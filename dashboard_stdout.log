@@ -1,0 +1,25 @@
+INFO:     Started server process [7244]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+Starting V7 Dashboard on http://0.0.0.0:8000
+INFO:     127.0.0.1:60082 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60082 - "GET /static/style.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60090 - "GET /static/script.js HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:60082 - "GET /api/edge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60090 - "GET /api/drawdown HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60104 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60120 - "GET /api/trades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60128 - "GET /api/performance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60116 - "GET /api/portfolio HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60090 - "GET /api/positions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60082 - "GET /api/signals HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60082 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:60082 - "GET /api/edge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60120 - "GET /api/performance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60090 - "GET /api/drawdown HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60128 - "GET /api/portfolio HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60104 - "GET /api/trades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60116 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60082 - "GET /api/signals HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60120 - "GET /api/positions HTTP/1.1" 200 OK
