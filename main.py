@@ -1,16 +1,6 @@
 """
-main.py — Async Orchestrator (Deriv WebSocket edition)
+main.py — Async Orchestrator (Multi-Asset Deriv WebSocket edition)
 Small Account Trading Bot | $10 → $100 | SMC + Full Kelly Compounding
-
-Architecture change vs MT5 version:
-  - No pending limit orders. Instead, the SMC engine identifies the OB
-    price zone and a live tick subscriber watches for price to enter it.
-  - When price touches the OB proximal edge, a MULTUP/MULTDOWN contract
-    is bought at market with dollar-amount SL and TP embedded.
-
-Run:
-    .venv/bin/python main.py
-    (or activate venv first: source .venv/bin/activate && python main.py)
 """
 
 import asyncio
@@ -18,7 +8,7 @@ import logging
 import signal
 import sys
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Dict
 
 import config
 from modules import connector
@@ -46,8 +36,9 @@ class ActiveZone:
     take_profit_amount: float
     balance_snapshot:   float
 
-_active_zone: Optional[ActiveZone] = None
-_in_trade: bool = False
+# Dicts to track state per symbol
+_active_zones: Dict[str, Optional[ActiveZone]] = {s: None for s in config.SYMBOLS}
+_in_trades:    Dict[str, bool] = {s: False for s in config.SYMBOLS}
 
 
 # ─── Tick Handler ─────────────────────────────────────────────────────────────
@@ -55,16 +46,20 @@ _in_trade: bool = False
 async def on_tick(tick: dict):
     """
     Called on every live tick from the Deriv subscription.
-    Checks if price has entered the active OB zone and enters if so.
+    Checks if price has entered the active OB zone for that specific symbol.
     """
-    global _active_zone, _in_trade
+    global _active_zones, _in_trades
 
-    if _active_zone is None or _in_trade:
+    symbol = tick.get("symbol")
+    if not symbol or symbol not in _active_zones:
+        return
+
+    if _active_zones[symbol] is None or _in_trades[symbol]:
         return
 
     bid = float(tick.get("bid", 0))
     ask = float(tick.get("ask", 0))
-    sig = _active_zone.signal
+    sig = _active_zones[symbol].signal
 
     zone_triggered = (
         (sig.direction == "BUY"  and ask <= sig.entry_price) or
@@ -75,13 +70,13 @@ async def on_tick(tick: dict):
         return
 
     log.info(
-        f"🎯 OB Zone HIT | {sig.direction} | Entry: {sig.entry_price:.5f} | "
+        f"🎯 OB Zone HIT | {symbol} | {sig.direction} | Entry: {sig.entry_price:.5f} | "
         f"Tick bid/ask: {bid:.5f}/{ask:.5f}"
     )
 
-    _in_trade = True
-    zone = _active_zone
-    _active_zone = None
+    _in_trades[symbol] = True
+    zone = _active_zones[symbol]
+    _active_zones[symbol] = None
 
     result = await place_multiplier_contract(
         signal=zone.signal,
@@ -101,19 +96,17 @@ async def on_tick(tick: dict):
     )
 
     if not result:
-        _in_trade = False  # Allow retry on next scan if trade failed
+        _in_trades[symbol] = False  # Allow retry on next scan if trade failed
 
 
 # ─── Scan Cycle ───────────────────────────────────────────────────────────────
 
 async def run_scan_cycle() -> bool:
     """
-    One full scan: fetch OHLC → SMC analysis → update active zone.
+    One full scan across all symbols.
     Returns False to stop the bot, True to continue.
     """
-    global _active_zone, _in_trade
-
-    symbol = config.SYMBOL
+    global _active_zones, _in_trades
 
     # ── Balance & target check ────────────────────────────────────────────────
     try:
@@ -131,22 +124,7 @@ async def run_scan_cycle() -> bool:
         f"Progress: {balance / config.ACCOUNT_TARGET_USD * 100:.1f}% ──"
     )
 
-    # ── Early open contract check (State Management) ─────────────────────────
-    # Always check actual broker state before proceeding
-    still_open = await has_open_contract(symbol)
-    if still_open:
-        if not _in_trade:
-            log.info("Active contract detected on start/scan — syncing state.")
-            _in_trade = True
-        log.info("Open contract active — holding.")
-        return True
-    else:
-        if _in_trade:
-            log.info("Contract closed (SL/TP hit). Ready for next setup.")
-            _in_trade = False
-            _active_zone = None  # Clear any old zone if trade closed
-
-    # ── Kelly sizing ──────────────────────────────────────────────────────────
+    # ── Kelly sizing (computed once per cycle) ─────────────────────────────
     try:
         sizing = calculate_stake(balance)
     except CircuitBreakerTripped as e:
@@ -161,53 +139,66 @@ async def run_scan_cycle() -> bool:
 
     stake, sl_amount, tp_amount = sizing
 
-    # ── Fetch OHLC ────────────────────────────────────────────────────────────
-    primary_df    = await fetch_ohlc(symbol, config.PRIMARY_TF_S)
-    confluence_df = await fetch_ohlc(symbol, config.CONFLUENCE_TF_S)
+    # ── Loop through all symbols ──────────────────────────────────────────────
+    for symbol in config.SYMBOLS:
+        # ── Early open contract check (State Management) ─────────────────────────
+        still_open = await has_open_contract(symbol)
+        if still_open:
+            if not _in_trades[symbol]:
+                log.info(f"Active contract detected for {symbol} — syncing state.")
+                _in_trades[symbol] = True
+            log.debug(f"{symbol} open contract active — holding.")
+            continue
+        else:
+            if _in_trades[symbol]:
+                log.info(f"Contract for {symbol} closed. Ready for next setup.")
+                _in_trades[symbol] = False
+                _active_zones[symbol] = None
 
-    if primary_df is None or confluence_df is None:
-        log.warning("OHLC fetch failed — skipping cycle.")
-        return True
+        # ── Fetch OHLC ────────────────────────────────────────────────────────────
+        primary_df    = await fetch_ohlc(symbol, config.PRIMARY_TF_S)
+        confluence_df = await fetch_ohlc(symbol, config.CONFLUENCE_TF_S)
 
-    # ── Current price (from connector's last cached tick) ─────────────────────
-    api = get_api()
-    # Use last known balance as price proxy — we'll get real price from ticks
-    # Fetch a fresh tick via a one-shot ticks_history (last candle close)
-    last_close = float(primary_df["close"].iloc[-1])
-    bid = last_close
-    ask = last_close
+        if primary_df is None or confluence_df is None:
+            log.warning(f"OHLC fetch failed for {symbol} — skipping.")
+            continue
 
-    # ── SMC Signal ────────────────────────────────────────────────────────────
-    signal = await detect_signal(
-        symbol=symbol,
-        primary_ohlc=primary_df,
-        confluence_ohlc=confluence_df,
-        current_bid=bid,
-        current_ask=ask,
-    )
+        # ── Current price (from last candle close) ─────────────────────────────
+        last_close = float(primary_df["close"].iloc[-1])
+        bid = last_close
+        ask = last_close
 
-    if signal is None:
-        log.info(f"No confluence setup found for {symbol}.")
-        _active_zone = None
-        return True
-
-    # ── Arm the active zone (tick handler will trigger entry) ─────────────────
-    # If we already have a zone armed for this direction, don't log unnecessarily
-    if _active_zone and _active_zone.signal.direction == signal.direction:
-        log.debug(f"Zone already armed for {signal.direction} {symbol}")
-    else:
-        _active_zone = ActiveZone(
-            signal=signal,
-            stake=stake,
-            stop_loss_amount=sl_amount,
-            take_profit_amount=tp_amount,
-            balance_snapshot=balance,
+        # ── SMC Signal ────────────────────────────────────────────────────────────
+        signal = await detect_signal(
+            symbol=symbol,
+            primary_ohlc=primary_df,
+            confluence_ohlc=confluence_df,
+            current_bid=bid,
+            current_ask=ask,
         )
-        log.info(
-            f"Zone armed | {signal.direction} {symbol} | "
-            f"Entry: {signal.entry_price:.5f} | "
-            f"OB [{signal.ob_bottom:.5f}–{signal.ob_top:.5f}]"
-        )
+
+        if signal is None:
+            log.debug(f"No confluence setup found for {symbol}.")
+            _active_zones[symbol] = None
+            continue
+
+        # ── Arm the active zone (tick handler will trigger entry) ─────────────────
+        if _active_zones[symbol] and _active_zones[symbol].signal.direction == signal.direction:
+            log.debug(f"Zone already armed for {signal.direction} {symbol}")
+        else:
+            _active_zones[symbol] = ActiveZone(
+                signal=signal,
+                stake=stake,
+                stop_loss_amount=sl_amount,
+                take_profit_amount=tp_amount,
+                balance_snapshot=balance,
+            )
+            log.info(
+                f"Zone armed | {symbol} {signal.direction} | "
+                f"Entry: {signal.entry_price:.5f} | "
+                f"OB [{signal.ob_bottom:.5f}–{signal.ob_top:.5f}]"
+            )
+            
     return True
 
 
@@ -221,8 +212,8 @@ async def health_monitor():
             log.warning("⚠️  Deriv API disconnected! Attempting reconnection...")
             if await api.connect():
                 log.info("✅ Reconnected to Deriv. Re-subscribing to ticks...")
-                # Re-subscribe to ticks after reconnection
-                await api.subscribe_ticks(config.SYMBOL, on_tick)
+                for symbol in config.SYMBOLS:
+                    await api.subscribe_ticks(symbol, on_tick)
             else:
                 log.error("❌ Reconnection failed. Will retry next health check.")
 
@@ -242,12 +233,11 @@ async def main():
     log.info("=" * 60)
     mode_str = "🧪 DEMO / VIRTUAL ACCOUNT" if config.DEMO_MODE else "🔴 LIVE ACCOUNT"
     log.info(f"  Mode      : {mode_str}")
-    log.info(f"  Symbol    : {config.SYMBOL}")
+    log.info(f"  Symbols   : {', '.join(config.SYMBOLS)}")
     log.info(f"  Target    : ${config.ACCOUNT_TARGET_USD:.2f}")
     log.info(f"  Kelly     : {config.KELLY_FRACTION * 100:.0f}% of balance per trade")
     log.info(f"  Max Stake : ${config.MAX_STAKE_USD:.2f} per trade")
     log.info(f"  Multiplier: {config.MULTIPLIER}x")
-    log.info(f"  CB Floor  : ${config.CIRCUIT_BREAKER_USD:.2f}")
     log.info(f"  TF        : {config.PRIMARY_TF_S}s primary / {config.CONFLUENCE_TF_S}s confluence")
     log.info("=" * 60)
 
@@ -259,10 +249,13 @@ async def main():
         log.critical("Cannot connect to Deriv API. Check credentials. Exiting.")
         sys.exit(1)
 
-    log_session_event("BOT_START", f"Symbol: {config.SYMBOL}")
+    log_session_event("BOT_START", f"Symbols: {config.SYMBOLS}")
 
     # ── Subscribe to live ticks ───────────────────────────────────────────────
-    sub_id = await get_api().subscribe_ticks(config.SYMBOL, on_tick)
+    sub_ids = []
+    for symbol in config.SYMBOLS:
+        sid = await get_api().subscribe_ticks(symbol, on_tick)
+        if sid: sub_ids.append(sid)
 
     # ── Start health monitor ──────────────────────────────────────────────────
     monitor_task = asyncio.create_task(health_monitor())
@@ -274,15 +267,14 @@ async def main():
             if not should_continue:
                 break
 
-            # Wait for next cycle (interruptible by shutdown)
             try:
                 await asyncio.wait_for(
                     asyncio.shield(_shutdown_event.wait()),
                     timeout=config.SCAN_INTERVAL_S,
                 )
-                break  # shutdown was signalled
+                break
             except asyncio.TimeoutError:
-                pass  # normal — next scan
+                pass
 
     except Exception as e:
         log.critical(f"Unhandled error in main loop: {e}", exc_info=True)
@@ -291,10 +283,9 @@ async def main():
     finally:
         _shutdown_event.set()
         monitor_task.cancel()
-        try:
-            await get_api().unsubscribe(sub_id)
-        except Exception:
-            pass
+        for sid in sub_ids:
+            try: await get_api().unsubscribe(sid)
+            except Exception: pass
         log_session_event("BOT_STOP")
         await connector.shutdown()
         log.info("Bot shut down cleanly.")

@@ -182,9 +182,9 @@ async def detect_signal(
                 conf = 0.7 + (0.3 if not bull_fvg_c.empty else 0.0)
                 
                 if rf_model is not None:
-                    # direction_encoded, ob_size, atr, rsi, price_vs_ema
-                    features = pd.DataFrame([[1, abs(ob_top - ob_bottom), latest_atr, latest_rsi, price_vs_ema]], 
-                                            columns=["direction_encoded", "ob_size", "atr", "rsi", "price_vs_ema"])
+                    # direction_encoded, ob_size_pct, atr_pct, rsi, price_vs_ema
+                    features = pd.DataFrame([[1, abs(ob_top - ob_bottom) / current_close, latest_atr / current_close, latest_rsi, price_vs_ema]], 
+                                            columns=["direction_encoded", "ob_size_pct", "atr_pct", "rsi", "price_vs_ema"])
                     prob_win = rf_model.predict_proba(features)[0][1]
                     if prob_win < 0.60:
                         log.info(f"[BULL] Vetoed by AI. Win Prob: {prob_win:.2%} < 60%")
@@ -227,9 +227,9 @@ async def detect_signal(
                 conf = 0.7 + (0.3 if not bear_fvg_c.empty else 0.0)
                 
                 if rf_model is not None:
-                    # direction_encoded, ob_size, atr, rsi, price_vs_ema
-                    features = pd.DataFrame([[0, abs(ob_top - ob_bottom), latest_atr, latest_rsi, price_vs_ema]], 
-                                            columns=["direction_encoded", "ob_size", "atr", "rsi", "price_vs_ema"])
+                    # direction_encoded, ob_size_pct, atr_pct, rsi, price_vs_ema
+                    features = pd.DataFrame([[0, abs(ob_top - ob_bottom) / current_close, latest_atr / current_close, latest_rsi, price_vs_ema]], 
+                                            columns=["direction_encoded", "ob_size_pct", "atr_pct", "rsi", "price_vs_ema"])
                     prob_win = rf_model.predict_proba(features)[0][1]
                     if prob_win < 0.60:
                         log.info(f"[BEAR] Vetoed by AI. Win Prob: {prob_win:.2%} < 60%")

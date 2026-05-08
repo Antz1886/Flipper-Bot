@@ -32,7 +32,7 @@ def train_model():
     df["direction_encoded"] = df["direction"].apply(lambda x: 1 if x == "BUY" else 0)
     
     # Select features
-    features = ["direction_encoded", "ob_size", "atr", "rsi", "price_vs_ema"]
+    features = ["direction_encoded", "ob_size_pct", "atr_pct", "rsi", "price_vs_ema"]
     X = df[features]
     y = df["label"]
     

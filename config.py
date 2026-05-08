@@ -22,7 +22,7 @@ DERIV_WS_URL    = f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID}"
 #   Volatility 75 Index → R_75
 #   Volatility 100 Index → R_100
 #   Crash 1000 Index → CRASH1000
-SYMBOL          = os.getenv("SYMBOL", "R_75")
+SYMBOLS         = ["R_75", "R_100"]
 PRIMARY_TF_S    = 300    # M5  — primary signal timeframe (seconds)
 CONFLUENCE_TF_S = 900    # M15 — confluence timeframe (seconds)
 N_BARS          = 500    # Candles to fetch per OHLC request
