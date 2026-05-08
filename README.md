@@ -1,4 +1,4 @@
-# Deriv Small Account Trading Bot
+# Flipper Bot
 ### $10 → $100 | Smart Money Concepts + AI Predictive Filtering + Kelly Compounding
 
 A fully autonomous Linux-native trading bot designed for Deriv Synthetic Indices (specifically **Volatility 75**). It uses Smart Money Concepts (FVG + Order Blocks) for signal generation, an **XGBoost/Random Forest AI model** for high-probability trade filtering, and dynamic **Full Kelly position sizing** for aggressive account growth.
