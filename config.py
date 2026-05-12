@@ -36,7 +36,7 @@ DEMO_MODE = True
 KELLY_FRACTION      = 0.22     # 22% of balance risked per trade (Full Kelly)
 MIN_STAKE_USD       = 1.00    # Minimum stake enforced by Deriv
 MAX_STAKE_USD       = 100.00  # Safety cap per trade (prevents runaway sizing on demo)
-RISK_REWARD_RATIO   = 2.0     # Minimum R:R for take-profit amount calculation
+RISK_REWARD_RATIO   = 5.0     # Increased to 5.0 for asymmetric wealth creation strategy
 
 # Live account targets ($10 real money)
 _REAL_CIRCUIT_BREAKER = 4.00
@@ -50,13 +50,24 @@ CIRCUIT_BREAKER_USD = _DEMO_CIRCUIT_BREAKER if DEMO_MODE else _REAL_CIRCUIT_BREA
 ACCOUNT_TARGET_USD  = _DEMO_TARGET          if DEMO_MODE else _REAL_TARGET
 
 # ─── Multiplier Contract Settings ─────────────────────────────────────────────
-# Available multipliers for R_75: 10, 20, 30, 50, 100
-# Higher multiplier = more sensitive P&L per price move
-MULTIPLIER = 50
+# These are DEFAULTS — the bot will dynamically discover valid multipliers
+# at startup via the `contracts_for` API. If discovery fails, these are used.
+# Available multipliers depend on the symbol:
+#   R_75  : 10, 20, 30, 50, 100
+#   R_100 : 40, 100, 200, 300, 400
+SYMBOL_MULTIPLIERS = {
+    "R_75":  50,
+    "R_100": 40       # Changed from 100 → 40 as safe default
+}
 
 # ─── SMC Engine ───────────────────────────────────────────────────────────────
 SWING_LENGTH  = 10    # Swing lookback for Order Block detection
 OB_BUFFER_PCT = 0.05  # 5% buffer beyond OB distal edge for price zone
+
+# ─── Zone & Trade Management ─────────────────────────────────────────────────
+ZONE_TTL_S            = 4 * 3600   # 4 hours — max time a zone stays armed
+TRADE_COOLDOWN_S      = 60         # Min seconds between trades on same symbol
+MAX_CONCURRENT_TRADES = 2          # Max open contracts across ALL symbols
 
 # ─── Loop Timing ──────────────────────────────────────────────────────────────
 SCAN_INTERVAL_S  = 30.0   # Seconds between SMC scan cycles
@@ -66,6 +77,9 @@ HEALTH_CHECK_S   = 30.0   # Connection health-check interval
 MAX_RETRIES     = 3
 RETRY_DELAY_S   = 2.0
 MAGIC_COMMENT   = "SMC_MICRO_BOT"   # Stored in contract purchase_time comment
+
+# ─── AI Filter ────────────────────────────────────────────────────────────────
+AI_VETO_THRESHOLD = 0.65   # Increased to 0.65 for higher selectivity (Cheetah mode)
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 LOG_FILE  = "bot.log"

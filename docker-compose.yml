@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  flipper-bot:
+    build: .
+    container_name: flipper-bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./bot.log:/app/bot.log
+      - ./trades.csv:/app/trades.csv
+      - ./models:/app/models
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

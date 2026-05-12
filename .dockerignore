@@ -1,0 +1,16 @@
+.git
+.venv
+.venv_bot
+.venv_new
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.db
+.DS_Store
+.env
+bot.pid
+*.log
+!bot.log
+trades.csv
+!trades.csv.template

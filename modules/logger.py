@@ -2,6 +2,8 @@
 modules/logger.py — Structured Logging & Trade Journal
 Writes all bot activity to a rotating log file (bot.log) and
 appends every trade event to a CSV journal (trades.csv).
+
+v2.0 — Added trade outcome logging (WIN/LOSS/PnL tracking).
 """
 
 import csv
@@ -17,7 +19,7 @@ _CSV_FIELDS = [
     "timestamp", "symbol", "direction", "signal_type",
     "entry_price", "ob_top", "ob_bottom", "fvg_top", "fvg_bottom",
     "confidence", "stake_usd", "stop_loss_usd", "take_profit_usd",
-    "contract_id", "balance_before", "result", "notes",
+    "contract_id", "balance_before", "result", "pnl_usd", "balance_after", "notes",
 ]
 
 
@@ -84,8 +86,37 @@ def log_trade(
         "contract_id":    contract_id,
         "balance_before": round(balance_before, 4),
         "result":         result,
+        "pnl_usd":        "",
+        "balance_after":  "",
         "notes":          notes,
     }
+
+    with open(TRADE_CSV, "a", newline="", encoding="utf-8") as f:
+        csv.DictWriter(f, fieldnames=_CSV_FIELDS).writerow(row)
+
+
+def log_trade_outcome(
+    *,
+    symbol:         str,
+    contract_id:    str = "",
+    pnl_usd:        float = 0.0,
+    balance_after:  float = 0.0,
+    result:         str = "CLOSED",
+    notes:          str = "",
+) -> None:
+    """
+    Append a trade outcome (close/win/loss) row to trades.csv.
+    Called when a contract is detected as closed.
+    """
+    _ensure_header()
+    row = {field: "" for field in _CSV_FIELDS}
+    row["timestamp"]     = datetime.now(timezone.utc).isoformat()
+    row["symbol"]        = symbol
+    row["contract_id"]   = contract_id
+    row["result"]        = result
+    row["pnl_usd"]       = round(pnl_usd, 2) if pnl_usd else ""
+    row["balance_after"] = round(balance_after, 2) if balance_after else ""
+    row["notes"]         = notes
 
     with open(TRADE_CSV, "a", newline="", encoding="utf-8") as f:
         csv.DictWriter(f, fieldnames=_CSV_FIELDS).writerow(row)

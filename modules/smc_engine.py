@@ -4,11 +4,15 @@ Detects Fair Value Gaps (FVG) and Order Blocks (OB) using the
 smartmoneyconcepts library. Only emits a TradeSignal when both
 indicators align in the same direction on the primary timeframe,
 confirmed by a matching FVG on the confluence (M15) timeframe.
+
+v2.0 — Updated AI feature vector with candle structure features,
+       configurable veto threshold, and graceful model fallback.
 """
 
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
@@ -17,21 +21,43 @@ from smartmoneyconcepts import smc
 import os
 import joblib
 
-from config import SWING_LENGTH, RISK_REWARD_RATIO, OB_BUFFER_PCT
+from config import SWING_LENGTH, RISK_REWARD_RATIO, OB_BUFFER_PCT, AI_VETO_THRESHOLD
 
 log = logging.getLogger(__name__)
 
 # ─── AI Model ─────────────────────────────────────────────────────────────────
 MODEL_PATH = "models/rf_setup_scorer.pkl"
 rf_model = None
+MODEL_FEATURES = None  # Will be set after loading model
+
 try:
     if os.path.exists(MODEL_PATH):
         rf_model = joblib.load(MODEL_PATH)
+        # Try to detect which features the model expects
+        try:
+            MODEL_FEATURES = rf_model.feature_names_in_.tolist()
+            log.info(f"Loaded AI model with features: {MODEL_FEATURES}")
+        except AttributeError:
+            MODEL_FEATURES = None
+            log.info(f"Loaded AI model (feature names not embedded)")
         log.info(f"Loaded AI Setup Scorer model from {MODEL_PATH}")
     else:
         log.warning("AI model not found. Running in pure SMC mode.")
 except Exception as e:
     log.error(f"Failed to load AI model: {e}")
+
+# Feature columns for the new expanded model
+EXPANDED_FEATURES = [
+    "direction_encoded", "ob_size_pct", "atr_pct", "rsi", "price_vs_ema",
+    "candle_body_pct", "upper_wick_pct", "lower_wick_pct",
+    "distance_to_ob_pct", "hour_of_day"
+]
+
+# Legacy features for backward compatibility with old model
+LEGACY_FEATURES = [
+    "direction_encoded", "ob_size_pct", "atr_pct", "rsi", "price_vs_ema"
+]
+
 
 # ─── Signal Dataclass ─────────────────────────────────────────────────────────
 
@@ -111,6 +137,96 @@ def _compute_tp(entry: float, sl: float, direction: str) -> float:
         else (entry - risk * RISK_REWARD_RATIO)
 
 
+def _build_ai_features(
+    direction: str,
+    ob_top: float,
+    ob_bottom: float,
+    entry: float,
+    current_close: float,
+    df_ai: pd.DataFrame,
+    latest_atr: float,
+    latest_rsi: float,
+    price_vs_ema: float,
+) -> pd.DataFrame:
+    """
+    Build the feature vector for the AI model.
+    Automatically uses expanded or legacy features based on what the model expects.
+    """
+    direction_encoded = 1 if direction == "BUY" else 0
+    ob_size_pct = abs(ob_top - ob_bottom) / current_close if current_close else 0
+    atr_pct = latest_atr / current_close if current_close else 0
+    
+    # Candle structure features
+    last_open = float(df_ai["open"].iloc[-1])
+    last_high = float(df_ai["high"].iloc[-1])
+    last_low = float(df_ai["low"].iloc[-1])
+    
+    candle_body_pct = abs(current_close - last_open) / current_close if current_close else 0
+    upper_wick_pct = (last_high - max(last_open, current_close)) / current_close if current_close else 0
+    lower_wick_pct = (min(last_open, current_close) - last_low) / current_close if current_close else 0
+    distance_to_ob_pct = abs(current_close - entry) / current_close if current_close else 0
+    hour_of_day = datetime.now(timezone.utc).hour
+    
+    # Determine which feature set to use
+    if MODEL_FEATURES is not None:
+        feature_cols = MODEL_FEATURES
+    elif rf_model is not None:
+        # Try to infer from model's n_features_in_
+        try:
+            n_features = rf_model.n_features_in_
+            feature_cols = EXPANDED_FEATURES if n_features == len(EXPANDED_FEATURES) else LEGACY_FEATURES
+        except AttributeError:
+            feature_cols = LEGACY_FEATURES
+    else:
+        feature_cols = LEGACY_FEATURES
+    
+    # Build values dict for all possible features
+    all_values = {
+        "direction_encoded": direction_encoded,
+        "ob_size_pct": ob_size_pct,
+        "atr_pct": atr_pct,
+        "rsi": latest_rsi,
+        "price_vs_ema": price_vs_ema,
+        "candle_body_pct": candle_body_pct,
+        "upper_wick_pct": upper_wick_pct,
+        "lower_wick_pct": lower_wick_pct,
+        "distance_to_ob_pct": distance_to_ob_pct,
+        "hour_of_day": hour_of_day,
+    }
+    
+    # Build DataFrame with only the features the model expects
+    feature_values = [[all_values.get(f, 0) for f in feature_cols]]
+    return pd.DataFrame(feature_values, columns=feature_cols)
+
+
+def _ai_evaluate(
+    direction: str,
+    features: pd.DataFrame,
+) -> tuple[float | None, bool]:
+    """
+    Evaluate the setup using the AI model.
+    Returns (win_probability, approved).
+    Returns (None, True) if no model is available (pure SMC mode).
+    """
+    if rf_model is None:
+        return None, True
+    
+    try:
+        prob_win = rf_model.predict_proba(features)[0][1]
+        approved = prob_win >= AI_VETO_THRESHOLD
+        
+        dir_tag = "BULL" if direction == "BUY" else "BEAR"
+        if approved:
+            log.info(f"✨ [{dir_tag}] AI Approved Setup! Win Prob: {prob_win:.2%}")
+        else:
+            log.info(f"🚫 [{dir_tag}] Vetoed by AI. Win Prob: {prob_win:.2%} < {AI_VETO_THRESHOLD:.0%}")
+        
+        return prob_win, approved
+    except Exception as e:
+        log.warning(f"AI evaluation failed: {e} — approving by default.")
+        return None, True
+
+
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 async def detect_signal(
@@ -147,20 +263,23 @@ async def detect_signal(
         
         # ── Compute TA Features for AI ───────────────────────────────────────
         latest_atr, latest_rsi, price_vs_ema = 0.0, 0.0, 0.0
-        if rf_model is not None:
-            # We use a copy to avoid SettingWithCopyWarnings
-            df_ai = primary_ohlc.copy()
-            df_ai["ATR"] = ta.atr(df_ai["high"], df_ai["low"], df_ai["close"], length=14)
-            df_ai["RSI"] = ta.rsi(df_ai["close"], length=14)
-            df_ai["EMA_50"] = ta.ema(df_ai["close"], length=50)
-            
-            latest_atr = df_ai["ATR"].iloc[-1]
-            latest_rsi = df_ai["RSI"].iloc[-1]
-            latest_ema = df_ai["EMA_50"].iloc[-1]
-            current_close = df_ai["close"].iloc[-1]
-            
-            if pd.notna(latest_ema) and latest_ema != 0:
-                price_vs_ema = (current_close - latest_ema) / latest_ema
+        df_ai = primary_ohlc.copy()
+        
+        df_ai["ATR"] = ta.atr(df_ai["high"], df_ai["low"], df_ai["close"], length=14)
+        df_ai["RSI"] = ta.rsi(df_ai["close"], length=14)
+        df_ai["EMA_50"] = ta.ema(df_ai["close"], length=50)
+        
+        latest_atr = df_ai["ATR"].iloc[-1]
+        latest_rsi = df_ai["RSI"].iloc[-1]
+        latest_ema = df_ai["EMA_50"].iloc[-1]
+        current_close = float(df_ai["close"].iloc[-1])
+        
+        if pd.notna(latest_ema) and latest_ema != 0:
+            price_vs_ema = (current_close - latest_ema) / latest_ema
+        
+        # Handle NaN values
+        if pd.isna(latest_atr): latest_atr = 0.0
+        if pd.isna(latest_rsi): latest_rsi = 50.0  # neutral default
 
         # ── BULLISH setup ─────────────────────────────────────────────────────
         if not bull_fvg_p.empty and not bull_ob_p.empty:
@@ -181,16 +300,19 @@ async def detect_signal(
             if current_bid > ob_top:
                 conf = 0.7 + (0.3 if not bull_fvg_c.empty else 0.0)
                 
-                if rf_model is not None:
-                    # direction_encoded, ob_size_pct, atr_pct, rsi, price_vs_ema
-                    features = pd.DataFrame([[1, abs(ob_top - ob_bottom) / current_close, latest_atr / current_close, latest_rsi, price_vs_ema]], 
-                                            columns=["direction_encoded", "ob_size_pct", "atr_pct", "rsi", "price_vs_ema"])
-                    prob_win = rf_model.predict_proba(features)[0][1]
-                    if prob_win < 0.60:
-                        log.info(f"[BULL] Vetoed by AI. Win Prob: {prob_win:.2%} < 60%")
-                        return None
+                # AI evaluation
+                features = _build_ai_features(
+                    "BUY", ob_top, ob_bottom, entry, current_close,
+                    df_ai, latest_atr, latest_rsi, price_vs_ema
+                )
+                prob_win, approved = _ai_evaluate("BUY", features)
+                
+                if not approved:
+                    return None
+                
+                if prob_win is not None:
                     conf = prob_win
-                    log.info(f"✨ [BULL] AI Approved Setup! Win Prob: {prob_win:.2%}")
+                
                 sig = TradeSignal(
                     symbol=symbol, direction="BUY",
                     entry_price=round(entry, 6),
@@ -226,16 +348,19 @@ async def detect_signal(
             if current_ask < ob_bottom:
                 conf = 0.7 + (0.3 if not bear_fvg_c.empty else 0.0)
                 
-                if rf_model is not None:
-                    # direction_encoded, ob_size_pct, atr_pct, rsi, price_vs_ema
-                    features = pd.DataFrame([[0, abs(ob_top - ob_bottom) / current_close, latest_atr / current_close, latest_rsi, price_vs_ema]], 
-                                            columns=["direction_encoded", "ob_size_pct", "atr_pct", "rsi", "price_vs_ema"])
-                    prob_win = rf_model.predict_proba(features)[0][1]
-                    if prob_win < 0.60:
-                        log.info(f"[BEAR] Vetoed by AI. Win Prob: {prob_win:.2%} < 60%")
-                        return None
+                # AI evaluation
+                features = _build_ai_features(
+                    "SELL", ob_top, ob_bottom, entry, current_close,
+                    df_ai, latest_atr, latest_rsi, price_vs_ema
+                )
+                prob_win, approved = _ai_evaluate("SELL", features)
+                
+                if not approved:
+                    return None
+                
+                if prob_win is not None:
                     conf = prob_win
-                    log.info(f"✨ [BEAR] AI Approved Setup! Win Prob: {prob_win:.2%}")
+                
                 sig = TradeSignal(
                     symbol=symbol, direction="SELL",
                     entry_price=round(entry, 6),

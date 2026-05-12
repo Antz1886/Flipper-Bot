@@ -3,6 +3,9 @@ modules/connector.py — Deriv WebSocket API Connection Manager
 Maintains a single persistent WebSocket connection to the Deriv API.
 Routes responses via req_id-keyed Futures and dispatches tick/balance
 subscription updates to registered callbacks.
+
+v2.0 — Added connection_healthy flag, duplicate handler prevention,
+       and improved disconnect resilience.
 """
 
 import asyncio
@@ -35,6 +38,7 @@ class DerivAPI:
         self.currency: str = "USD"
         self.authorized: bool = False
         self.is_active: bool = False
+        self.connection_healthy: bool = False  # True only when WS is confirmed alive
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -86,6 +90,7 @@ class DerivAPI:
             log.error(f"recv_loop error: {e}", exc_info=True)
         finally:
             self.is_active = False
+            self.connection_healthy = False
             # Reject all pending futures on disconnect
             for fut in self._pending.values():
                 if not fut.done():
@@ -99,7 +104,8 @@ class DerivAPI:
         # Cleanup previous state
         self.authorized = False
         self.is_active = False
-        self._tick_handlers = []
+        self.connection_healthy = False
+        # Don't clear tick handlers on reconnect — they should persist
         if self._recv_task:
             self._recv_task.cancel()
         
@@ -121,6 +127,7 @@ class DerivAPI:
                 self.balance  = float(info.get("balance", 0))
                 self.currency = info.get("currency", "USD")
                 self.authorized = True
+                self.connection_healthy = True
                 log.info(
                     f"Authorized | Account: {info.get('email','?')} | "
                     f"Balance: {self.currency} {self.balance:.2f}"
@@ -156,7 +163,10 @@ class DerivAPI:
 
     async def subscribe_ticks(self, symbol: str, callback: Callable) -> str:
         """Subscribe to live ticks for a symbol. Returns subscription id."""
-        self._tick_handlers.append(callback)
+        # Prevent duplicate handler registration
+        if callback not in self._tick_handlers:
+            self._tick_handlers.append(callback)
+        
         resp = await self.send({"ticks": symbol, "subscribe": 1})
         sub_id = resp.get("subscription", {}).get("id", "")
         log.info(f"Subscribed to ticks for {symbol} | sub_id: {sub_id}")
@@ -170,6 +180,7 @@ class DerivAPI:
     async def is_connected(self) -> bool:
         """Ping the server to check connection health."""
         if not self._ws or self._ws.state != State.OPEN:
+            self.connection_healthy = False
             return False
         try:
             # Use a short timeout for the health check ping
@@ -178,12 +189,15 @@ class DerivAPI:
             self._pending[rid] = fut
             await self._ws.send(json.dumps({"ping": 1, "req_id": rid}))
             await asyncio.wait_for(fut, timeout=5)
+            self.connection_healthy = True
             return True
         except Exception:
+            self.connection_healthy = False
             return False
 
     async def disconnect(self):
         """Gracefully close the WebSocket connection."""
+        self.connection_healthy = False
         if self._recv_task:
             self._recv_task.cancel()
         if self._ws:
