@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("ml_data_collector")
 
 DATA_FILE = "ml_data/historical_setups.csv"
-CANDLES_TO_FETCH = 50000  # 50k per symbol
+CANDLES_TO_FETCH = 100000  # 100k per symbol for better coverage
 SYMBOLS_TO_COLLECT = ["R_75", "R_100"]
 
 async def fetch_historical_data(api, symbol: str, granularity: int, total_candles: int) -> pd.DataFrame:
@@ -71,6 +71,9 @@ def simulate_setups(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     obs = ob_data[ob_data["OB"].notna() & (ob_data["OB"] != 0)].copy()
     
     setups = []
+    wins = 0
+    losses = 0
+    
     for idx, ob_row in obs.iterrows():
         direction = "BUY" if ob_row["OB"] == 1 else "SELL"
         ob_top, ob_bottom = ob_row["Top"], ob_row["Bottom"]
@@ -116,16 +119,45 @@ def simulate_setups(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         if outcome is not None:
             feat = df.iloc[idx]
             price = feat["close"]
-            setups.append({
+            
+            # Skip if price is zero (data error)
+            if price == 0:
+                continue
+            
+            ema_val = feat["EMA_50"]
+            
+            # Build expanded feature set
+            setup = {
                 "symbol": symbol,
                 "direction": direction,
                 # NORMALIZED FEATURES (Percentage of price)
                 "ob_size_pct": abs(ob_top - ob_bottom) / price,
-                "atr_pct": feat["ATR"] / price,
-                "rsi": feat["RSI"],
-                "price_vs_ema": (price - feat["EMA_50"]) / feat["EMA_50"] if feat["EMA_50"] else 0,
+                "atr_pct": feat["ATR"] / price if pd.notna(feat["ATR"]) else 0,
+                "rsi": feat["RSI"] if pd.notna(feat["RSI"]) else 50.0,
+                "price_vs_ema": (price - ema_val) / ema_val if pd.notna(ema_val) and ema_val != 0 else 0,
+                # NEW: Candle structure features
+                "candle_body_pct": abs(feat["close"] - feat["open"]) / price,
+                "upper_wick_pct": (feat["high"] - max(feat["open"], feat["close"])) / price,
+                "lower_wick_pct": (min(feat["open"], feat["close"]) - feat["low"]) / price,
+                "distance_to_ob_pct": abs(price - entry) / price,
+                "hour_of_day": feat["time"].hour if hasattr(feat["time"], "hour") else 0,
                 "label": outcome
-            })
+            }
+            setups.append(setup)
+            
+            if outcome == 1:
+                wins += 1
+            else:
+                losses += 1
+    
+    total = wins + losses
+    if total > 0:
+        log.info(
+            f"[{symbol}] Dataset: {total} setups | "
+            f"Wins: {wins} ({wins/total:.1%}) | Losses: {losses} ({losses/total:.1%})"
+        )
+    else:
+        log.warning(f"[{symbol}] No valid setups generated!")
             
     return pd.DataFrame(setups)
 
@@ -147,6 +179,27 @@ async def main():
     if not all_setups: return
     
     final_df = pd.concat(all_setups)
+    
+    # Data quality report
+    log.info("=" * 60)
+    log.info("DATA QUALITY REPORT")
+    log.info(f"  Total setups: {len(final_df)}")
+    log.info(f"  Win rate: {final_df['label'].mean():.1%}")
+    log.info(f"  Per symbol:")
+    for sym in final_df['symbol'].unique():
+        sub = final_df[final_df['symbol'] == sym]
+        log.info(f"    {sym}: {len(sub)} setups, win rate: {sub['label'].mean():.1%}")
+    log.info(f"  Feature columns: {list(final_df.columns)}")
+    
+    win_rate = final_df['label'].mean()
+    if win_rate > 0.85:
+        log.warning(f"⚠️  Dataset is heavily skewed toward wins ({win_rate:.1%}). Model may overfit!")
+    elif win_rate < 0.15:
+        log.warning(f"⚠️  Dataset is heavily skewed toward losses ({win_rate:.1%}). Check R:R settings!")
+    else:
+        log.info(f"  ✅ Class balance looks reasonable ({win_rate:.1%} wins)")
+    log.info("=" * 60)
+    
     final_df.to_csv(DATA_FILE, index=False)
     log.info(f"Combined extensive dataset saved to {DATA_FILE}. Total setups: {len(final_df)}")
 

@@ -139,15 +139,24 @@ async def sync_portfolio_state():
     Prevents opening duplicate positions after a restart.
     """
     for symbol in config.SYMBOLS:
-        status = await has_open_contract(symbol)
-        if status is True:
-            _in_trades[symbol] = True
-            _last_trade_time[symbol] = time.time()
-            log.info(f"📋 Startup sync: Active contract found for {symbol} — marking in-trade.")
-        elif status is False:
-            log.info(f"📋 Startup sync: No active contract for {symbol} — ready to trade.")
-        else:
-            log.warning(f"📋 Startup sync: Could not determine state for {symbol} — assuming clear.")
+        for attempt in range(1, 4):
+            status = await has_open_contract(symbol)
+            if status is True:
+                _in_trades[symbol] = True
+                _last_trade_time[symbol] = time.time()
+                log.info(f"📋 Startup sync: Active contract found for {symbol} — marking in-trade.")
+                break
+            elif status is False:
+                log.info(f"📋 Startup sync: No active contract for {symbol} — ready to trade.")
+                break
+            else:
+                log.warning(f"📋 Startup sync: Could not determine state for {symbol} (attempt {attempt}/3).")
+                if attempt < 3:
+                    await asyncio.sleep(2 * attempt)
+                else:
+                    log.critical(f"❌ Startup sync failed for {symbol}. Bot may open duplicate trades!")
+                    # Safety: assume in-trade if we can't be sure
+                    _in_trades[symbol] = True
 
 
 # ─── Tick Handler ─────────────────────────────────────────────────────────────
@@ -272,12 +281,9 @@ async def run_scan_cycle() -> bool:
 
     # ── Loop through all symbols ──────────────────────────────────────────────
     for symbol in config.SYMBOLS:
-        # ── Check concurrent trade limit ──────────────────────────────────────
-        if _count_open_trades() >= config.MAX_CONCURRENT_TRADES:
-            log.debug(f"Max concurrent trades ({config.MAX_CONCURRENT_TRADES}) reached — skipping {symbol}.")
-            continue
-
         # ── Open contract check (with disconnect safety) ──────────────────────
+        # We ALWAYS check this first, even if we are at max trades, 
+        # so we can detect when a trade has closed.
         still_open = await has_open_contract(symbol)
         
         if still_open is None:
@@ -323,6 +329,12 @@ async def run_scan_cycle() -> bool:
                 
                 _in_trades[symbol] = False
                 _active_zones[symbol] = None
+
+        # ── Check concurrent trade limit ──────────────────────────────────────
+        # Only check this AFTER we've verified existing trades.
+        if _count_open_trades() >= config.MAX_CONCURRENT_TRADES:
+            log.debug(f"Max concurrent trades ({config.MAX_CONCURRENT_TRADES}) reached — skipping scan for {symbol}.")
+            continue
 
         # ── Zone TTL check — expire stale zones ──────────────────────────────
         if _active_zones[symbol] is not None:
@@ -398,16 +410,23 @@ async def run_scan_cycle() -> bool:
 
 async def health_monitor():
     while not _shutdown_event.is_set():
-        await asyncio.sleep(config.HEALTH_CHECK_S)
-        api = get_api()
-        if not api or not await api.is_connected():
-            log.warning("⚠️  Deriv API disconnected! Attempting reconnection...")
-            if await api.connect():
-                log.info("✅ Reconnected to Deriv. Re-subscribing to ticks...")
-                for symbol in config.SYMBOLS:
-                    await api.subscribe_ticks(symbol, on_tick)
-            else:
-                log.error("❌ Reconnection failed. Will retry next health check.")
+        try:
+            await asyncio.sleep(config.HEALTH_CHECK_S)
+            api = get_api()
+            if not api or not await api.is_connected():
+                log.warning("⚠️  Deriv API disconnected! Attempting reconnection...")
+                if await api.connect():
+                    log.info("✅ Reconnected to Deriv. Re-subscribing to ticks...")
+                    for symbol in config.SYMBOLS:
+                        try:
+                            await api.subscribe_ticks(symbol, on_tick)
+                        except Exception as e:
+                            log.error(f"Failed to re-subscribe to {symbol}: {e}")
+                else:
+                    log.error("❌ Reconnection failed. Will retry next health check.")
+        except Exception as e:
+            log.error(f"Health monitor encountered an error: {e}", exc_info=True)
+            await asyncio.sleep(10)  # Brief pause before retrying loop
 
 
 # ─── Signal Handlers ──────────────────────────────────────────────────────────

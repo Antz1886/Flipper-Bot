@@ -167,10 +167,14 @@ class DerivAPI:
         if callback not in self._tick_handlers:
             self._tick_handlers.append(callback)
         
-        resp = await self.send({"ticks": symbol, "subscribe": 1})
-        sub_id = resp.get("subscription", {}).get("id", "")
-        log.info(f"Subscribed to ticks for {symbol} | sub_id: {sub_id}")
-        return sub_id
+        try:
+            resp = await self.send({"ticks": symbol, "subscribe": 1})
+            sub_id = resp.get("subscription", {}).get("id", "")
+            log.info(f"Subscribed to ticks for {symbol} | sub_id: {sub_id}")
+            return sub_id
+        except Exception as e:
+            log.error(f"Subscription failed for {symbol}: {e}")
+            raise
 
     async def unsubscribe(self, sub_id: str):
         """Cancel a subscription by its id."""

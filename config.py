@@ -36,7 +36,7 @@ DEMO_MODE = True
 KELLY_FRACTION      = 0.22     # 22% of balance risked per trade (Full Kelly)
 MIN_STAKE_USD       = 1.00    # Minimum stake enforced by Deriv
 MAX_STAKE_USD       = 100.00  # Safety cap per trade (prevents runaway sizing on demo)
-RISK_REWARD_RATIO   = 5.0     # Increased to 5.0 for asymmetric wealth creation strategy
+RISK_REWARD_RATIO   = 2.0     # Optimized for high win rate and faster compounding
 
 # Live account targets ($10 real money)
 _REAL_CIRCUIT_BREAKER = 4.00
