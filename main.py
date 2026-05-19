@@ -264,20 +264,7 @@ async def run_scan_cycle() -> bool:
         f"Open trades: {open_count}/{config.MAX_CONCURRENT_TRADES} ──"
     )
 
-    # ── Kelly sizing (computed once per cycle) ─────────────────────────────
-    try:
-        sizing = calculate_stake(balance)
-    except CircuitBreakerTripped as e:
-        log.critical(f"🛑 CIRCUIT BREAKER: {e}")
-        log_session_event("CIRCUIT_BREAKER", str(e))
-        log.info("Pausing for 5 minutes...")
-        await asyncio.sleep(300)
-        return True
 
-    if sizing is None:
-        return True
-
-    stake, sl_amount, tp_amount = sizing
 
     # ── Loop through all symbols ──────────────────────────────────────────────
     for symbol in config.SYMBOLS:
@@ -386,6 +373,23 @@ async def run_scan_cycle() -> bool:
                     f"{existing.direction}@{existing.entry_price:.2f} → "
                     f"{signal.direction}@{signal.entry_price:.2f} — re-arming."
                 )
+
+        # ── Calculate Position Size ───────────────────────────────────────────
+        try:
+            multiplier = config.SYMBOL_MULTIPLIERS.get(symbol, 50)
+            sizing = calculate_stake(balance, signal, multiplier)
+        except CircuitBreakerTripped as e:
+            log.critical(f"🛑 CIRCUIT BREAKER: {e}")
+            log_session_event("CIRCUIT_BREAKER", str(e))
+            log.info("Pausing for 5 minutes...")
+            await asyncio.sleep(300)
+            return True
+            
+        if sizing is None:
+            log.debug(f"Sizing rejected trade for {symbol} (balance low or leverage too high).")
+            continue
+            
+        stake, sl_amount, tp_amount = sizing
 
         # ── Arm the active zone (tick handler will trigger entry) ─────────────
         _active_zones[symbol] = ActiveZone(
