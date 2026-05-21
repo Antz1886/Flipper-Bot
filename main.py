@@ -449,13 +449,17 @@ async def main():
         try:
             with open(PID_FILE, 'r') as f:
                 old_pid = int(f.read().strip())
-            # Check if process is actually running
-            os.kill(old_pid, 0)
-            print(f"❌ ERROR: Bot is already running (PID {old_pid}). Exiting.")
-            sys.exit(1)
+            # Check if process is actually running (and is not us)
+            if old_pid != os.getpid():
+                os.kill(old_pid, 0)
+                print(f"❌ ERROR: Bot is already running (PID {old_pid}). Exiting.")
+                sys.exit(1)
         except (OSError, ValueError):
             # Process not running or stale pid file
-            os.remove(PID_FILE)
+            try:
+                os.remove(PID_FILE)
+            except OSError:
+                pass
 
     with open(PID_FILE, 'w') as f:
         f.write(str(os.getpid()))
@@ -467,7 +471,7 @@ async def main():
     log.info(f"  Mode      : {mode_str}")
     log.info(f"  Symbols   : {', '.join(config.SYMBOLS)}")
     log.info(f"  Target    : ${config.ACCOUNT_TARGET_USD:.2f}")
-    log.info(f"  Kelly     : {config.KELLY_FRACTION * 100:.0f}% of balance per trade")
+    log.info(f"  Target Risk: {config.KELLY_FRACTION * 100:.0f}% of balance (Quant Sizing)")
     log.info(f"  Max Stake : ${config.MAX_STAKE_USD:.2f} per trade")
     log.info(f"  Max Concurrent: {config.MAX_CONCURRENT_TRADES} trades")
     log.info(f"  Zone TTL  : {config.ZONE_TTL_S/3600:.0f} hours")

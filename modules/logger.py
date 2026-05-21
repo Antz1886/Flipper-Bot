@@ -35,6 +35,10 @@ def setup_logging(level: int = logging.INFO) -> None:
     ch.setFormatter(fmt)
     root.addHandler(ch)
 
+    log_dir = os.path.dirname(LOG_FILE)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+
     fh = logging.handlers.RotatingFileHandler(
         LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
     )

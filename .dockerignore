@@ -12,5 +12,6 @@ __pycache__
 bot.pid
 *.log
 !bot.log
+logs/
 trades.csv
 !trades.csv.template

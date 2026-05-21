@@ -15,6 +15,13 @@ load_dotenv()
 # Register app at: https://api.deriv.com/
 DERIV_APP_ID    = os.getenv("DERIV_APP_ID", "1089")
 DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "")
+
+if not DERIV_API_TOKEN or DERIV_API_TOKEN == "your_api_token_here":
+    raise ValueError(
+        "CRITICAL: Deriv API token is missing or invalid! "
+        "Please ensure your .env file is present and contains a valid DERIV_API_TOKEN."
+    )
+
 DERIV_WS_URL    = f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID}"
 
 # ─── Symbol & Timeframe ───────────────────────────────────────────────────────
@@ -82,5 +89,5 @@ MAGIC_COMMENT   = "SMC_MICRO_BOT"   # Stored in contract purchase_time comment
 AI_VETO_THRESHOLD = 0.65   # Increased to 0.65 for higher selectivity (Cheetah mode)
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-LOG_FILE  = "bot.log"
+LOG_FILE  = "logs/bot.log"
 TRADE_CSV = "trades.csv"
