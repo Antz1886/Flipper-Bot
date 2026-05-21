@@ -40,6 +40,35 @@ class DerivAPI:
         self.is_active: bool = False
         self.connection_healthy: bool = False  # True only when WS is confirmed alive
 
+    async def _cleanup(self):
+        """Cancel receiver task, close websocket, and reject pending futures."""
+        self.authorized = False
+        self.is_active = False
+        self.connection_healthy = False
+        
+        # 1. Cancel receiver task
+        if self._recv_task:
+            self._recv_task.cancel()
+            try:
+                await self._recv_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._recv_task = None
+            
+        # 2. Close websocket
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+            
+        # 3. Reject pending futures
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(ConnectionError("Connection cleaned up"))
+        self._pending.clear()
+
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _next_id(self) -> int:
@@ -101,21 +130,15 @@ class DerivAPI:
 
     async def connect(self) -> bool:
         """Open WebSocket, start receiver, authorize. Returns True on success."""
-        # Cleanup previous state
-        self.authorized = False
-        self.is_active = False
-        self.connection_healthy = False
-        # Don't clear tick handlers on reconnect — they should persist
-        if self._recv_task:
-            self._recv_task.cancel()
-        
         for attempt in range(1, MAX_RETRIES + 1):
+            await self._cleanup()
             try:
                 self._ws = await websockets.connect(
                     DERIV_WS_URL,
                     ping_interval=None,  # Disable library keepalive to prevent 1011 errors
                     ping_timeout=None,
                     close_timeout=10,
+                    open_timeout=10,
                 )
                 self.is_active = True
                 self._recv_task = asyncio.create_task(self._recv_loop())
@@ -139,7 +162,9 @@ class DerivAPI:
 
             except Exception as e:
                 log.warning(f"Connection attempt {attempt}/{MAX_RETRIES} failed: {e}")
-                await asyncio.sleep(RETRY_DELAY_S * attempt)
+                await self._cleanup()
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(RETRY_DELAY_S * attempt)
 
         log.critical("Failed to connect to Deriv API after all retries.")
         return False
@@ -154,8 +179,9 @@ class DerivAPI:
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[rid] = fut
         try:
-            await self._ws.send(json.dumps(payload))
-            return await asyncio.wait_for(fut, timeout=60)  # Increased timeout
+            # Wrap write operation in a timeout to prevent hanging on dead/half-open sockets
+            await asyncio.wait_for(self._ws.send(json.dumps(payload)), timeout=10.0)
+            return await asyncio.wait_for(fut, timeout=30.0)
         except Exception:
             if rid in self._pending:
                 self._pending.pop(rid)
@@ -183,29 +209,27 @@ class DerivAPI:
 
     async def is_connected(self) -> bool:
         """Ping the server to check connection health."""
-        if not self._ws or self._ws.state != State.OPEN:
+        if not self.is_active or not self._ws or self._ws.state != State.OPEN:
             self.connection_healthy = False
             return False
+        rid = self._next_id()
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[rid] = fut
         try:
-            # Use a short timeout for the health check ping
-            rid = self._next_id()
-            fut = asyncio.get_event_loop().create_future()
-            self._pending[rid] = fut
-            await self._ws.send(json.dumps({"ping": 1, "req_id": rid}))
-            await asyncio.wait_for(fut, timeout=5)
+            # Wrap ping send and response in a short timeout
+            await asyncio.wait_for(self._ws.send(json.dumps({"ping": 1, "req_id": rid})), timeout=3.0)
+            await asyncio.wait_for(fut, timeout=3.0)
             self.connection_healthy = True
             return True
         except Exception:
+            if rid in self._pending:
+                self._pending.pop(rid)
             self.connection_healthy = False
             return False
 
     async def disconnect(self):
         """Gracefully close the WebSocket connection."""
-        self.connection_healthy = False
-        if self._recv_task:
-            self._recv_task.cancel()
-        if self._ws:
-            await self._ws.close()
+        await self._cleanup()
         log.info("Deriv WebSocket disconnected.")
 
 
