@@ -37,7 +37,7 @@ N_BARS          = 500    # Candles to fetch per OHLC request
 # ─── Demo / Live Mode ────────────────────────────────────────────────────────
 # Set DEMO_MODE = True while testing on a Deriv virtual account.
 # All proportions are preserved — just scaled 1000x to match the demo balance.
-DEMO_MODE = True
+DEMO_MODE = False
 
 # ─── Risk & Compounding ───────────────────────────────────────────────────────
 KELLY_FRACTION      = 0.22     # 22% of balance risked per trade (Full Kelly)

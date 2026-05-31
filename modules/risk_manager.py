@@ -84,9 +84,11 @@ def calculate_stake(balance: float, signal: TradeSignal, multiplier: int) -> tup
     required_stake = target_risk_usd / contract_loss_pct_at_sl
 
     # 6. Safety Caps
-    if required_stake > MAX_STAKE_USD:
-        log.debug(f"Calculated stake ${required_stake:.2f} capped to MAX_STAKE_USD ${MAX_STAKE_USD:.2f}")
-        stake = MAX_STAKE_USD
+    # Cap to the lower of MAX_STAKE_USD and the available account balance
+    max_allowed_stake = min(MAX_STAKE_USD, balance)
+    if required_stake > max_allowed_stake:
+        log.debug(f"Calculated stake ${required_stake:.2f} capped to available limit ${max_allowed_stake:.2f}")
+        stake = max_allowed_stake
         # Scale down the dollar risk proportionately
         stop_loss_amount = stake * contract_loss_pct_at_sl
     else:
