@@ -58,6 +58,10 @@ LEGACY_FEATURES = [
     "direction_encoded", "ob_size_pct", "atr_pct", "rsi", "price_vs_ema"
 ]
 
+# Cache of last logged vetoes per symbol to prevent log spam
+_last_logged_vetoes = {}
+
+
 
 # ─── Signal Dataclass ─────────────────────────────────────────────────────────
 
@@ -200,8 +204,11 @@ def _build_ai_features(
 
 
 def _ai_evaluate(
+    symbol: str,
     direction: str,
     features: pd.DataFrame,
+    entry_price: float,
+    is_duplicate: bool,
 ) -> tuple[float | None, bool]:
     """
     Evaluate the setup using the AI model.
@@ -216,14 +223,16 @@ def _ai_evaluate(
         approved = prob_win >= AI_VETO_THRESHOLD
         
         dir_tag = "BULL" if direction == "BUY" else "BEAR"
+        log_func = log.debug if is_duplicate else log.info
+        
         if approved:
-            log.info(f"✨ [{dir_tag}] AI Approved Setup! Win Prob: {prob_win:.2%}")
+            log.info(f"✨ {symbol} [{dir_tag}] AI Approved Setup! Win Prob: {prob_win:.2%}")
         else:
-            log.info(f"🚫 [{dir_tag}] Vetoed by AI. Win Prob: {prob_win:.2%} < {AI_VETO_THRESHOLD:.0%}")
+            log_func(f"🚫 {symbol} [{dir_tag}] Vetoed by AI. Win Prob: {prob_win:.2%} < {AI_VETO_THRESHOLD:.0%}")
         
         return prob_win, approved
     except Exception as e:
-        log.warning(f"AI evaluation failed: {e} — approving by default.")
+        log.warning(f"AI evaluation failed for {symbol}: {e} — approving by default.")
         return None, True
 
 
@@ -300,15 +309,31 @@ async def detect_signal(
             if current_bid > ob_top:
                 conf = 0.7 + (0.3 if not bull_fvg_c.empty else 0.0)
                 
+                # Check for duplicate veto
+                last_vetoed = _last_logged_vetoes.get(symbol)
+                is_duplicate = (
+                    last_vetoed is not None
+                    and last_vetoed["direction"] == "BUY"
+                    and abs(last_vetoed["entry_price"] - entry) / entry < 0.001
+                )
+                
                 # AI evaluation
                 features = _build_ai_features(
                     "BUY", ob_top, ob_bottom, entry, current_close,
                     df_ai, latest_atr, latest_rsi, price_vs_ema
                 )
-                prob_win, approved = _ai_evaluate("BUY", features)
+                prob_win, approved = _ai_evaluate(symbol, "BUY", features, entry, is_duplicate)
                 
                 if not approved:
+                    if not is_duplicate:
+                        _last_logged_vetoes[symbol] = {
+                            "direction": "BUY",
+                            "entry_price": entry
+                        }
                     return None
+                
+                # Clear veto cache on approval
+                _last_logged_vetoes.pop(symbol, None)
                 
                 if prob_win is not None:
                     conf = prob_win
@@ -348,15 +373,31 @@ async def detect_signal(
             if current_ask < ob_bottom:
                 conf = 0.7 + (0.3 if not bear_fvg_c.empty else 0.0)
                 
+                # Check for duplicate veto
+                last_vetoed = _last_logged_vetoes.get(symbol)
+                is_duplicate = (
+                    last_vetoed is not None
+                    and last_vetoed["direction"] == "SELL"
+                    and abs(last_vetoed["entry_price"] - entry) / entry < 0.001
+                )
+                
                 # AI evaluation
                 features = _build_ai_features(
                     "SELL", ob_top, ob_bottom, entry, current_close,
                     df_ai, latest_atr, latest_rsi, price_vs_ema
                 )
-                prob_win, approved = _ai_evaluate("SELL", features)
+                prob_win, approved = _ai_evaluate(symbol, "SELL", features, entry, is_duplicate)
                 
                 if not approved:
+                    if not is_duplicate:
+                        _last_logged_vetoes[symbol] = {
+                            "direction": "SELL",
+                            "entry_price": entry
+                        }
                     return None
+                
+                # Clear veto cache on approval
+                _last_logged_vetoes.pop(symbol, None)
                 
                 if prob_win is not None:
                     conf = prob_win
