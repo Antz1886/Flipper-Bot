@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("ml_data_collector")
 
 DATA_FILE = "ml_data/historical_setups.csv"
-CANDLES_TO_FETCH = 30000  # 30k per symbol for fast lookahead-bias-free simulation
+CANDLES_TO_FETCH = 10000  # 10k per symbol for fast, accurate slice-based simulation
 SYMBOLS_TO_COLLECT = ["R_75", "R_100"]
 
 async def fetch_historical_data(api, symbol: str, granularity: int, total_candles: int) -> pd.DataFrame:
@@ -207,6 +207,7 @@ def simulate_setups(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         log.warning(f"[{symbol}] No valid setups generated!")
         
     return pd.DataFrame(setups)
+
 
 async def main():
     os.makedirs("ml_data", exist_ok=True)

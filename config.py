@@ -44,7 +44,7 @@ KELLY_FRACTION      = 0.08     # 8% of balance risked per trade (Fractional Kell
 MAX_STAKE_PCT_OF_BALANCE = 0.50 # Protects account from total ruin, allows concurrent trades
 MIN_STAKE_USD       = 1.00    # Minimum stake enforced by Deriv
 MAX_STAKE_USD       = 100.00  # Safety cap per trade (prevents runaway sizing on demo)
-RISK_REWARD_RATIO   = 2.0     # Optimized for high win rate and faster compounding
+RISK_REWARD_RATIO   = 1.5     # Optimized for high win rate and faster compounding
 
 # Live account targets ($10 real money)
 _REAL_CIRCUIT_BREAKER = 1.50
@@ -87,7 +87,7 @@ RETRY_DELAY_S   = 2.0
 MAGIC_COMMENT   = "SMC_MICRO_BOT"   # Stored in contract purchase_time comment
 
 # ─── AI Filter ────────────────────────────────────────────────────────────────
-AI_VETO_THRESHOLD = 0.38   # Calibrated threshold (realistic win probabilities range from 19% to 46%)
+AI_VETO_THRESHOLD = 0.42   # Calibrated threshold (realistic win probabilities range from 18% to 51%)
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 LOG_FILE  = "logs/bot.log"
