@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("ml_data_collector")
 
 DATA_FILE = "ml_data/historical_setups.csv"
-CANDLES_TO_FETCH = 100000  # 100k per symbol for better coverage
+CANDLES_TO_FETCH = 30000  # 30k per symbol for fast lookahead-bias-free simulation
 SYMBOLS_TO_COLLECT = ["R_75", "R_100"]
 
 async def fetch_historical_data(api, symbol: str, granularity: int, total_candles: int) -> pd.DataFrame:
@@ -45,6 +45,8 @@ async def fetch_historical_data(api, symbol: str, granularity: int, total_candle
             log.error(f"Error fetching {symbol}: {e}")
             break
 
+    if not all_candles:
+        return pd.DataFrame()
     df = pd.DataFrame(all_candles)
     df = df.drop_duplicates(subset=["epoch"]).sort_values("epoch")
     df = df.rename(columns={"epoch": "time"})
@@ -64,92 +66,137 @@ def simulate_setups(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     df["EMA_50"] = ta.ema(df["close"], length=50)
     
     from smartmoneyconcepts import smc
-    fvg_data = smc.fvg(df, join_consecutive=False)
-    swings = smc.swing_highs_lows(df, swing_length=SWING_LENGTH)
-    ob_data = smc.ob(df, swing_highs_lows=swings)
-    
-    obs = ob_data[ob_data["OB"].notna() & (ob_data["OB"] != 0)].copy()
     
     setups = []
     wins = 0
     losses = 0
     
-    for idx, ob_row in obs.iterrows():
-        direction = "BUY" if ob_row["OB"] == 1 else "SELL"
-        ob_top, ob_bottom = ob_row["Top"], ob_row["Bottom"]
-        
-        recent_fvg = fvg_data.iloc[max(0, idx-5):idx+5]
-        if not (recent_fvg["FVG"] == (1 if direction == "BUY" else -1)).any(): continue
+    active_zone = None
+    
+    t = 500
+    while t < len(df):
+        if active_zone is not None:
+            direction, entry, sl, tp, armed_at, features = active_zone
             
-        if direction == "BUY":
-            entry = ob_top
-            sl = ob_bottom - (ob_top - ob_bottom) * OB_BUFFER_PCT
-            tp = _compute_tp(entry, sl, "BUY")
-        else:
-            entry = ob_bottom
-            sl = ob_top + (ob_top - ob_bottom) * OB_BUFFER_PCT
-            tp = _compute_tp(entry, sl, "SELL")
-            
-        future = df.iloc[idx + 2:]
-        if future.empty: continue
-        
-        # Entry
-        mask = future["low"] <= entry if direction == "BUY" else future["high"] >= entry
-        if not mask.any(): continue
-        entry_idx = mask.idxmax()
-        
-        # SL before entry
-        pre_entry = future.loc[:entry_idx]
-        if (pre_entry["low"] <= sl if direction == "BUY" else pre_entry["high"] >= sl).any(): continue
-            
-        # Outcome
-        post_entry = df.iloc[entry_idx:]
-        sl_hit = post_entry["low"] <= sl if direction == "BUY" else post_entry["high"] >= sl
-        tp_hit = post_entry["high"] >= tp if direction == "BUY" else post_entry["low"] <= tp
-        
-        first_sl = sl_hit.idxmax() if sl_hit.any() else None
-        first_tp = tp_hit.idxmax() if tp_hit.any() else None
-        
-        outcome = None
-        if first_sl is not None and first_tp is not None:
-            outcome = 1 if first_tp < first_sl else 0
-        elif first_tp is not None: outcome = 1
-        elif first_sl is not None: outcome = 0
-            
-        if outcome is not None:
-            feat = df.iloc[idx]
-            price = feat["close"]
-            
-            # Skip if price is zero (data error)
-            if price == 0:
+            # Check TTL
+            if t - armed_at > 48:
+                active_zone = None
+                t += 1
                 continue
             
-            ema_val = feat["EMA_50"]
+            candle = df.iloc[t]
+            triggered = (direction == "BUY" and candle["low"] <= entry) or (direction == "SELL" and candle["high"] >= entry)
             
-            # Build expanded feature set
-            setup = {
-                "symbol": symbol,
-                "direction": direction,
-                # NORMALIZED FEATURES (Percentage of price)
-                "ob_size_pct": abs(ob_top - ob_bottom) / price,
-                "atr_pct": feat["ATR"] / price if pd.notna(feat["ATR"]) else 0,
-                "rsi": feat["RSI"] if pd.notna(feat["RSI"]) else 50.0,
-                "price_vs_ema": (price - ema_val) / ema_val if pd.notna(ema_val) and ema_val != 0 else 0,
-                # NEW: Candle structure features
-                "candle_body_pct": abs(feat["close"] - feat["open"]) / price,
-                "upper_wick_pct": (feat["high"] - max(feat["open"], feat["close"])) / price,
-                "lower_wick_pct": (min(feat["open"], feat["close"]) - feat["low"]) / price,
-                "distance_to_ob_pct": abs(price - entry) / price,
-                "hour_of_day": feat["time"].hour if hasattr(feat["time"], "hour") else 0,
-                "label": outcome
-            }
-            setups.append(setup)
-            
-            if outcome == 1:
-                wins += 1
+            if triggered:
+                # Trade entered at candle t
+                post_entry = df.iloc[t:]
+                sl_hit = post_entry["low"] <= sl if direction == "BUY" else post_entry["high"] >= sl
+                tp_hit = post_entry["high"] >= tp if direction == "BUY" else post_entry["low"] <= tp
+                
+                first_sl = sl_hit.idxmax() if sl_hit.any() else None
+                first_tp = tp_hit.idxmax() if tp_hit.any() else None
+                
+                exit_idx = None
+                outcome = None
+                if first_sl is not None and first_tp is not None:
+                    if first_tp < first_sl:
+                        outcome = 1
+                        exit_idx = first_tp
+                    else:
+                        outcome = 0
+                        exit_idx = first_sl
+                elif first_tp is not None:
+                    outcome = 1
+                    exit_idx = first_tp
+                elif first_sl is not None:
+                    outcome = 0
+                    exit_idx = first_sl
+                
+                if outcome is not None and exit_idx is not None:
+                    if outcome == 1: wins += 1
+                    else: losses += 1
+                    
+                    # Store features and outcome
+                    setup_row = {
+                        "symbol": symbol,
+                        "direction": direction,
+                        "ob_size_pct": features["ob_size_pct"],
+                        "atr_pct": features["atr_pct"],
+                        "rsi": features["rsi"],
+                        "price_vs_ema": features["price_vs_ema"],
+                        "candle_body_pct": features["candle_body_pct"],
+                        "upper_wick_pct": features["upper_wick_pct"],
+                        "lower_wick_pct": features["lower_wick_pct"],
+                        "distance_to_ob_pct": features["distance_to_ob_pct"],
+                        "hour_of_day": features["hour_of_day"],
+                        "label": outcome
+                    }
+                    setups.append(setup_row)
+                    
+                    active_zone = None
+                    t = exit_idx + 1  # jump to after exit
+                    continue
+                else:
+                    active_zone = None
+                    t += 1
+                    continue
             else:
-                losses += 1
-    
+                t += 1
+                continue
+                
+        # If no active zone, check if we should scan at t
+        slice_df = df.iloc[t-499:t+1].copy().reset_index(drop=True)
+        try:
+            swings = smc.swing_highs_lows(slice_df, swing_length=SWING_LENGTH)
+            ob_data = smc.ob(slice_df, swing_highs_lows=swings)
+            fvg_data = smc.fvg(slice_df, join_consecutive=False)
+            
+            unmitigated = ob_data[ob_data["MitigatedIndex"] == 0]
+            if not unmitigated.empty:
+                last_ob = unmitigated.iloc[-1]
+                ob_val = last_ob["OB"]
+                if ob_val != 0 and pd.notna(ob_val):
+                    direction = "BUY" if ob_val == 1 else "SELL"
+                    recent_fvg = fvg_data.iloc[-5:]
+                    if (recent_fvg["FVG"] == (1 if direction == "BUY" else -1)).any():
+                        ob_top, ob_bottom = last_ob["Top"], last_ob["Bottom"]
+                        current_close = slice_df["close"].iloc[-1]
+                        
+                        if direction == "BUY" and current_close > ob_top:
+                            entry = ob_top
+                            sl = ob_bottom - (ob_top - ob_bottom) * OB_BUFFER_PCT
+                            tp = _compute_tp(entry, sl, "BUY")
+                        elif direction == "SELL" and current_close < ob_bottom:
+                            entry = ob_bottom
+                            sl = ob_top + (ob_top - ob_bottom) * OB_BUFFER_PCT
+                            tp = _compute_tp(entry, sl, "SELL")
+                        else:
+                            t += 1
+                            continue
+                            
+                        # Capture features at candle t (the current closed candle)
+                        feat_row = df.iloc[t]
+                        price = feat_row["close"]
+                        ema_val = feat_row["EMA_50"]
+                        
+                        features = {
+                            "ob_size_pct": abs(ob_top - ob_bottom) / price,
+                            "atr_pct": feat_row["ATR"] / price if pd.notna(feat_row["ATR"]) else 0,
+                            "rsi": feat_row["RSI"] if pd.notna(feat_row["RSI"]) else 50.0,
+                            "price_vs_ema": (price - ema_val) / ema_val if pd.notna(ema_val) and ema_val != 0 else 0,
+                            "candle_body_pct": abs(feat_row["close"] - feat_row["open"]) / price,
+                            "upper_wick_pct": (feat_row["high"] - max(feat_row["open"], feat_row["close"])) / price,
+                            "lower_wick_pct": (min(feat_row["open"], feat_row["close"]) - feat_row["low"]) / price,
+                            "distance_to_ob_pct": abs(price - entry) / price,
+                            "hour_of_day": feat_row["time"].hour if hasattr(feat_row["time"], "hour") else 0
+                        }
+                        
+                        active_zone = (direction, entry, sl, tp, t, features)
+            
+        except Exception as e:
+            pass
+        t += 1
+        
     total = wins + losses
     if total > 0:
         log.info(
@@ -158,7 +205,7 @@ def simulate_setups(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         )
     else:
         log.warning(f"[{symbol}] No valid setups generated!")
-            
+        
     return pd.DataFrame(setups)
 
 async def main():
@@ -168,6 +215,9 @@ async def main():
     
     all_setups = []
     for symbol in SYMBOLS_TO_COLLECT:
+        if not await api.is_connected():
+            log.info(f"Deriv API connection inactive. Reconnecting before fetching {symbol}...")
+            await api.connect()
         df = await fetch_historical_data(api, symbol, PRIMARY_TF_S, CANDLES_TO_FETCH)
         if df is not None and not df.empty:
             setups_df = simulate_setups(df, symbol)

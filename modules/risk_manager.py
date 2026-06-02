@@ -22,6 +22,7 @@ from config import (
     RISK_REWARD_RATIO,
     ACCOUNT_TARGET_USD,
     DEMO_MODE,
+    MAX_STAKE_PCT_OF_BALANCE,
 )
 
 log = logging.getLogger(__name__)
@@ -84,8 +85,8 @@ def calculate_stake(balance: float, signal: TradeSignal, multiplier: int) -> tup
     required_stake = target_risk_usd / contract_loss_pct_at_sl
 
     # 6. Safety Caps
-    # Cap to the lower of MAX_STAKE_USD and the available account balance
-    max_allowed_stake = min(MAX_STAKE_USD, balance)
+    # Cap to the lower of MAX_STAKE_USD and a fraction of the available account balance
+    max_allowed_stake = min(MAX_STAKE_USD, balance * MAX_STAKE_PCT_OF_BALANCE)
     if required_stake > max_allowed_stake:
         log.debug(f"Calculated stake ${required_stake:.2f} capped to available limit ${max_allowed_stake:.2f}")
         stake = max_allowed_stake
