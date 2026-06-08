@@ -34,6 +34,7 @@ class DerivAPI:
         self._pending: dict[int, asyncio.Future] = {}
         self._tick_handlers: list[Callable] = []
         self._recv_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
         self.balance: float = 0.0
         self.currency: str = "USD"
         self.authorized: bool = False
@@ -41,12 +42,21 @@ class DerivAPI:
         self.connection_healthy: bool = False  # True only when WS is confirmed alive
 
     async def _cleanup(self):
-        """Cancel receiver task, close websocket, and reject pending futures."""
+        """Cancel receiver task, heartbeat task, close websocket, and reject pending futures."""
         self.authorized = False
         self.is_active = False
         self.connection_healthy = False
         
-        # 1. Cancel receiver task
+        # 1. Cancel heartbeat task
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._heartbeat_task = None
+
+        # 2. Cancel receiver task
         if self._recv_task:
             self._recv_task.cancel()
             try:
@@ -55,7 +65,7 @@ class DerivAPI:
                 pass
             self._recv_task = None
             
-        # 2. Close websocket
+        # 3. Close websocket
         if self._ws:
             try:
                 await self._ws.close()
@@ -63,7 +73,7 @@ class DerivAPI:
                 pass
             self._ws = None
             
-        # 3. Reject pending futures
+        # 4. Reject pending futures
         for fut in self._pending.values():
             if not fut.done():
                 fut.set_exception(ConnectionError("Connection cleaned up"))
@@ -126,6 +136,24 @@ class DerivAPI:
                     fut.set_exception(ConnectionError("WebSocket disconnected"))
             self._pending.clear()
 
+    async def _heartbeat_loop(self):
+        """Send a ping frame to Deriv API every 25 seconds to keep connection alive."""
+        log.info("Starting WebSocket heartbeat loop (ping every 25s)")
+        try:
+            while self.is_active:
+                await asyncio.sleep(25.0)
+                # Check connection health using the is_connected method
+                healthy = await self.is_connected()
+                if not healthy:
+                    log.warning("Heartbeat health check failed! WebSocket connection is dead.")
+                    if self._ws:
+                        await self._ws.close()
+                    break
+        except asyncio.CancelledError:
+            log.debug("Heartbeat loop cancelled")
+        except Exception as e:
+            log.error(f"Error in heartbeat loop: {e}")
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     async def connect(self) -> bool:
@@ -158,6 +186,9 @@ class DerivAPI:
 
                 # Subscribe to balance updates
                 await self.send({"balance": 1, "subscribe": 1})
+
+                # Start heartbeat loop
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
                 return True
 
             except Exception as e:

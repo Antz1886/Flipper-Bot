@@ -35,8 +35,9 @@ class CircuitBreakerTripped(Exception):
 def calculate_stake(balance: float, signal: TradeSignal, multiplier: int) -> tuple[float, float, float] | None:
     """
     Calculate required margin stake, stop_loss amount, and take_profit amount
-    such that the dollar loss at the SMC stop-loss level exactly equals the
-    Kelly criterion target risk.
+    such that the trade is executed with a hardcoded $1.00 stake (Account Flip mode)
+    while maintaining absolute Stop Loss and Take Profit levels based on SMC engine's
+    Order Block invalidation level.
 
     Parameters
     ----------
@@ -57,8 +58,8 @@ def calculate_stake(balance: float, signal: TradeSignal, multiplier: int) -> tup
     if balance >= ACCOUNT_TARGET_USD:
         return None  # Target reached — caller handles shutdown
 
-    # 1. Target Dollar Risk
-    target_risk_usd = round(balance * KELLY_FRACTION, 2)
+    # 1. Account Flip mode: hardcode stake to exactly $1.00
+    stake = 1.00
 
     # 2. Structural Distances
     sl_pct = abs(signal.entry_price - signal.stop_loss) / signal.entry_price
@@ -81,30 +82,13 @@ def calculate_stake(balance: float, signal: TradeSignal, multiplier: int) -> tup
     if contract_loss_pct_at_sl == 0:
         return None  # Prevent division by zero
 
-    # 5. Calculate Stake required to match our exact Target Risk at the SMC SL
-    required_stake = target_risk_usd / contract_loss_pct_at_sl
-
-    # 6. Safety Caps
-    # Cap to the lower of MAX_STAKE_USD and a fraction of the available account balance
-    max_allowed_stake = min(MAX_STAKE_USD, balance * MAX_STAKE_PCT_OF_BALANCE)
-    if required_stake > max_allowed_stake:
-        log.debug(f"Calculated stake ${required_stake:.2f} capped to available limit ${max_allowed_stake:.2f}")
-        stake = max_allowed_stake
-        # Scale down the dollar risk proportionately
-        stop_loss_amount = stake * contract_loss_pct_at_sl
-    else:
-        stake = required_stake
-        stop_loss_amount = target_risk_usd
-
-    if stake < MIN_STAKE_USD:
-        log.warning(
-            f"Required stake ${stake:.2f} is below Deriv minimum ${MIN_STAKE_USD:.2f}. "
-            "Trade skipped."
-        )
-        return None
-
-    # Calculate proportional TP
+    # 5. Calculate Stop Loss and Take Profit dollar amounts based on the $1.00 stake
+    stop_loss_amount = stake * contract_loss_pct_at_sl
     take_profit_amount = stake * (tp_pct * multiplier)
+
+    # Ensure stop loss amount is at least 0.01 USD
+    stop_loss_amount = max(0.01, stop_loss_amount)
+    take_profit_amount = max(0.01, take_profit_amount)
 
     stake = round(stake, 2)
     stop_loss_amount = round(stop_loss_amount, 2)
@@ -113,12 +97,13 @@ def calculate_stake(balance: float, signal: TradeSignal, multiplier: int) -> tup
     mode_tag = "[DEMO]" if DEMO_MODE else "[LIVE]"
 
     log.info(
-        f"{mode_tag} Quant Sizing | Target Risk: ${target_risk_usd:.2f} | "
+        f"{mode_tag} [ACCOUNT FLIP] Override Sizing | "
         f"Stake: ${stake:.2f} | SL_Amt: ${stop_loss_amount:.2f} | "
         f"TP_Amt: ${take_profit_amount:.2f} | "
         f"SL dist: {sl_pct*100:.2f}% | Risking {contract_loss_pct_at_sl*100:.1f}% of stake"
     )
     return stake, stop_loss_amount, take_profit_amount
+
 
 
 async def get_balance() -> float:

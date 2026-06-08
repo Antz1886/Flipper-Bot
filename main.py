@@ -37,6 +37,7 @@ log = logging.getLogger(__name__)
 
 # ─── Bot State ────────────────────────────────────────────────────────────────
 _shutdown_event = asyncio.Event()
+_portfolio_synced = False
 
 @dataclass
 class ActiveZone:
@@ -135,28 +136,39 @@ async def discover_multipliers():
 
 async def sync_portfolio_state():
     """
-    Called once at startup to sync _in_trades with actual Deriv portfolio.
+    Called once at startup (and upon reconnection) to sync _in_trades with actual Deriv portfolio.
     Prevents opening duplicate positions after a restart.
     """
+    global _portfolio_synced
+    _portfolio_synced = False
+
+    log.info("📋 Syncing portfolio state with Deriv...")
     for symbol in config.SYMBOLS:
+        synced_symbol = False
         for attempt in range(1, 4):
             status = await has_open_contract(symbol)
             if status is True:
                 _in_trades[symbol] = True
                 _last_trade_time[symbol] = time.time()
-                log.info(f"📋 Startup sync: Active contract found for {symbol} — marking in-trade.")
+                log.info(f"📋 Portfolio sync: Active contract found for {symbol} — marking in-trade.")
+                synced_symbol = True
                 break
             elif status is False:
-                log.info(f"📋 Startup sync: No active contract for {symbol} — ready to trade.")
+                _in_trades[symbol] = False
+                log.info(f"📋 Portfolio sync: No active contract for {symbol} — ready to trade.")
+                synced_symbol = True
                 break
             else:
-                log.warning(f"📋 Startup sync: Could not determine state for {symbol} (attempt {attempt}/3).")
+                log.warning(f"📋 Portfolio sync: Could not determine state for {symbol} (attempt {attempt}/3).")
                 if attempt < 3:
                     await asyncio.sleep(2 * attempt)
-                else:
-                    log.critical(f"❌ Startup sync failed for {symbol}. Bot may open duplicate trades!")
-                    # Safety: assume in-trade if we can't be sure
-                    _in_trades[symbol] = True
+
+        if not synced_symbol:
+            log.critical(f"❌ Portfolio sync failed for {symbol}. Bot may open duplicate trades!")
+            # Safety: assume in-trade if we can't be sure
+            _in_trades[symbol] = True
+
+    _portfolio_synced = True
 
 
 # ─── Tick Handler ─────────────────────────────────────────────────────────────
@@ -168,6 +180,9 @@ async def on_tick(tick: dict):
     Uses per-symbol locks to prevent duplicate entries.
     """
     global _active_zones, _in_trades
+
+    if not _portfolio_synced:
+        return
 
     symbol = tick.get("symbol")
     if not symbol or symbol not in _active_zones:
@@ -245,6 +260,10 @@ async def run_scan_cycle() -> bool:
     Returns False to stop the bot, True to continue.
     """
     global _active_zones, _in_trades
+
+    if not _portfolio_synced:
+        log.warning("Scan cycle skipped: portfolio not synced.")
+        return True
 
     # ── Balance & target check ────────────────────────────────────────────────
     try:
@@ -418,16 +437,39 @@ async def health_monitor():
             await asyncio.sleep(config.HEALTH_CHECK_S)
             api = get_api()
             if not api or not await api.is_connected():
-                log.warning("⚠️  Deriv API disconnected! Attempting reconnection...")
-                if await api.connect():
-                    log.info("✅ Reconnected to Deriv. Re-subscribing to ticks...")
+                log.warning("⚠️  Deriv API disconnected! Starting reconnection loop...")
+                
+                # Start exponential backoff reconnection loop
+                delay = 2.0
+                reconnected = False
+                while not _shutdown_event.is_set():
+                    log.info(f"Attempting to reconnect in {delay:.1f}s...")
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(_shutdown_event.wait()),
+                            timeout=delay
+                        )
+                        break  # Shutdown requested
+                    except asyncio.TimeoutError:
+                        pass
+                    
+                    if await api.connect():
+                        reconnected = True
+                        break
+                    delay = min(delay * 2, 60.0)
+                
+                if reconnected and not _shutdown_event.is_set():
+                    log.info("✅ Reconnected to Deriv. Syncing portfolio state first...")
+                    await sync_portfolio_state()
+                    
+                    log.info("Re-subscribing to ticks...")
                     for symbol in config.SYMBOLS:
                         try:
                             await api.subscribe_ticks(symbol, on_tick)
                         except Exception as e:
                             log.error(f"Failed to re-subscribe to {symbol}: {e}")
-                else:
-                    log.error("❌ Reconnection failed. Will retry next health check.")
+                elif not reconnected:
+                    log.error("❌ Reconnection loop stopped.")
         except Exception as e:
             log.error(f"Health monitor encountered an error: {e}", exc_info=True)
             await asyncio.sleep(10)  # Brief pause before retrying loop
