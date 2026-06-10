@@ -1,11 +1,31 @@
 # Flipper Bot
-### $10 → $100 | Smart Money Concepts + AI Predictive Filtering + Kelly Compounding
+### $10 → $100 | Smart Money Concepts + AI Predictive Filtering + Growth Mode Compounding
 
-A fully autonomous Linux-native trading bot designed for Deriv Synthetic Indices (specifically **Volatility 75**). It uses Smart Money Concepts (FVG + Order Blocks) for signal generation, an **XGBoost/Random Forest AI model** for high-probability trade filtering, and dynamic **Full Kelly position sizing** for aggressive account growth.
+A fully autonomous Linux-native trading bot designed for Deriv Synthetic Indices (specifically **Volatility 75** and **Volatility 100**). It uses Smart Money Concepts (FVG + Order Blocks) for signal generation, a **Random Forest AI model** for high-probability trade filtering, and a dual-mode risk management system for account compounding and drawdown survival.
 
 ---
 
-## Architecture
+## Growth Mode & Risk Management Architecture
+
+The bot has been transitioned into **Growth Mode** to compound the account balance up to $20.00 (and eventually to the $100.00 target). This is governed by three core pillars:
+
+### 1. Threshold Compounding
+To protect the balance when the account is low, the bot runs a threshold gate:
+* **Account Flip Mode (`balance < $5.00`):** The stake is hardcoded at exactly **`$1.00`** to survive variance and drawdowns.
+* **Growth Mode (`balance >= $5.00`):** The bot unlocks dynamic position sizing, setting the stake to **`20%` of the account balance** (`balance * 0.20`).
+
+### 2. Fixed 1:3 Asymmetric Risk-to-Reward
+To ensure that winning trades rapidly recover losing streaks, the bot enforces an asymmetric payout:
+* **Stop Loss (SL):** Calculated dynamically based on the SMC Order Block invalidation level.
+* **Take Profit (TP):** Forced to be exactly **`3.0 * absolute_sl_amount`** (1:3 Risk-to-Reward). A single win recovers three typical losses.
+
+### 3. Upgraded AI Confidence Filter
+* Every setup is passed to a Random Forest model trained on candle structure, momentum (RSI), volatility (ATR), and trend context.
+* To protect the compounding phase, the minimum win probability required to approve a trade is set to **`45%`** (vetoing any setup where `win_prob < 45%`).
+
+---
+
+## Directory Layout
 
 ```
 small_account_bot/
@@ -23,22 +43,14 @@ small_account_bot/
     ├── connector.py         # Deriv WebSocket API manager
     ├── data_feed.py         # OHLC & Tick data streams
     ├── smc_engine.py        # SMC Logic + AI Inference Engine
-    ├── risk_manager.py      # Kelly Criterion & Stake calculator
+    ├── risk_manager.py      # Sizing & asymmetric R:R calculator
     ├── order_executor.py    # Deriv contract execution
     └── logger.py            # CSV trade journal & logging
 ```
 
 ---
 
-## New Feature: AI Phase 1 (Predictive Setup Scoring)
-The bot now includes a machine learning confirmation layer. 
-- **The Filter:** Every SMC signal is evaluated by a Random Forest model trained on 100,000+ historical candles.
-- **Features:** The AI analyzes current Volatility (ATR), Momentum (RSI), and Trend Context (EMA 50) before approving a trade.
-- **The Veto:** Even if a "textbook" SMC setup is found, the AI will veto the trade if the predicted win probability is < 60%, significantly reducing drawdown during choppy market regimes.
-
----
-
-## Setup
+## Setup & Execution
 
 ### 1. Install dependencies
 ```bash
@@ -51,43 +63,31 @@ Create a `.env` file from the template:
 cp .env.template .env
 ```
 Set your Deriv API Token (Trade + Read scope) and App ID:
-```
+```env
 DERIV_API_TOKEN=your_token_here
 DERIV_APP_ID=your_app_id
 ```
 
-### 3. Training the AI
-To update the AI model with the latest market data:
-1. Run `python ml_data_collector.py` to fetch fresh historical data.
-2. Run `python ml_trainer.py` to retrain the model and save the new `.pkl` file.
-
----
-
-## Run
-
+### 3. Running the Bot
+To start the bot in the background:
 ```bash
-python main.py
+nohup python3 main.py > bot_stdout.log 2>&1 &
 ```
-
-The bot will:
-1. Establish a persistent WebSocket connection to Deriv.
-2. Scan M5/M15 timeframes for unmitigated FVG + Order Block confluences.
-3. Pass signals through the AI filter.
-4. Execute trades using Multipliers with automated Kelly stake sizing.
 
 ---
 
 ## Key Parameters (`config.py`)
 
-| Parameter | Default | Description |
+| Parameter | Current Value | Description |
 |---|---|---|
-| `SYMBOL` | `R_75` | Volatility 75 Index |
-| `KELLY_FRACTION` | `0.22` | Full Kelly (22% of balance) |
-| `RISK_REWARD_RATIO` | `2.0` | Minimum 1:2 R:R |
-| `MULTIPLIER` | `50` | Deriv Multiplier setting |
+| `SYMBOLS` | `["R_75", "R_100"]` | Tradable synthetic indices |
+| `AI_VETO_THRESHOLD` | `0.45` | Minimum win probability required (45%) |
+| `KELLY_FRACTION` | `0.08` | Fractional Kelly (8% risk per trade fallback) |
+| `MAX_STAKE_PCT_OF_BALANCE` | `0.50` | Maximum allocation allowed across open trades |
+| `ZONE_TTL_S` | `14400` | Zone Time-To-Live (4 hours before expiry) |
 | `SCAN_INTERVAL_S` | `30` | Seconds between scan cycles |
 
 ---
 
 ## Risk Disclosure
-This bot uses **Full Kelly sizing** on a micro-account ($10). This is extremely aggressive. While the AI filter increases win rates, synthetic indices are highly volatile. **Use at your own risk.**
+This bot uses aggressive position sizing and is designed for micro-accounts. While the AI filter and dynamic stop-loss preserve capital during drawdown, synthetic indices are highly leveraged and volatile. **Use at your own risk.**
