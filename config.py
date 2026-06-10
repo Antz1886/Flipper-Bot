@@ -87,7 +87,7 @@ RETRY_DELAY_S   = 2.0
 MAGIC_COMMENT   = "SMC_MICRO_BOT"   # Stored in contract purchase_time comment
 
 # ─── AI Filter ────────────────────────────────────────────────────────────────
-AI_VETO_THRESHOLD = 0.42   # Calibrated threshold (realistic win probabilities range from 18% to 51%)
+AI_VETO_THRESHOLD = 0.45   # Calibrated threshold (realistic win probabilities range from 18% to 51%)
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 LOG_FILE  = "logs/bot.log"

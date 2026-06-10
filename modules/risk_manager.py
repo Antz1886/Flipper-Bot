@@ -58,8 +58,13 @@ def calculate_stake(balance: float, signal: TradeSignal, multiplier: int) -> tup
     if balance >= ACCOUNT_TARGET_USD:
         return None  # Target reached — caller handles shutdown
 
-    # 1. Account Flip mode: hardcode stake to exactly $1.00
-    stake = 1.00
+    # 1. Growth Mode Compounding: Threshold sizing gate
+    if balance < 5.00:
+        stake = 1.00
+        strategy_mode = "[ACCOUNT FLIP]"
+    else:
+        stake = balance * 0.20
+        strategy_mode = "[GROWTH]"
 
     # 2. Structural Distances
     sl_pct = abs(signal.entry_price - signal.stop_loss) / signal.entry_price
@@ -82,12 +87,13 @@ def calculate_stake(balance: float, signal: TradeSignal, multiplier: int) -> tup
     if contract_loss_pct_at_sl == 0:
         return None  # Prevent division by zero
 
-    # 5. Calculate Stop Loss and Take Profit dollar amounts based on the $1.00 stake
+    # 5. Calculate Stop Loss and Take Profit dollar amounts based on the calculated stake
     stop_loss_amount = stake * contract_loss_pct_at_sl
-    take_profit_amount = stake * (tp_pct * multiplier)
-
     # Ensure stop loss amount is at least 0.01 USD
     stop_loss_amount = max(0.01, stop_loss_amount)
+
+    # Force absolute Take Profit (TP) to be exactly 3.0 * Stop Loss amount (1:3 R:R)
+    take_profit_amount = 3.0 * stop_loss_amount
     take_profit_amount = max(0.01, take_profit_amount)
 
     stake = round(stake, 2)
@@ -97,12 +103,16 @@ def calculate_stake(balance: float, signal: TradeSignal, multiplier: int) -> tup
     mode_tag = "[DEMO]" if DEMO_MODE else "[LIVE]"
 
     log.info(
-        f"{mode_tag} [ACCOUNT FLIP] Override Sizing | "
+        f"{mode_tag} {strategy_mode} Override Sizing | "
         f"Stake: ${stake:.2f} | SL_Amt: ${stop_loss_amount:.2f} | "
         f"TP_Amt: ${take_profit_amount:.2f} | "
         f"SL dist: {sl_pct*100:.2f}% | Risking {contract_loss_pct_at_sl*100:.1f}% of stake"
     )
     return stake, stop_loss_amount, take_profit_amount
+
+
+# Alias for compatibility with Growth Mode requests
+calculate_sizing = calculate_stake
 
 
 
