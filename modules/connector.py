@@ -34,6 +34,7 @@ class DerivAPI:
         self._req_id: int = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._tick_handlers: list[Callable] = []
+        self._transaction_handlers: list[Callable] = []
         self._recv_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
         self.balance: float = 0.0
@@ -144,6 +145,12 @@ class DerivAPI:
                     self.balance  = float(bal.get("balance", self.balance))
                     self.currency = bal.get("currency", self.currency)
                     log.debug(f"Balance update: {self.currency} {self.balance:.4f}")
+
+                # ── Transaction subscription updates ──────────────────────────
+                elif msg_type == "transaction":
+                    tx = msg.get("transaction", {})
+                    for cb in self._transaction_handlers:
+                        asyncio.create_task(cb(tx))
 
         except websockets.exceptions.ConnectionClosed as e:
             log.warning(f"WebSocket connection closed: {e}")
@@ -289,6 +296,19 @@ class DerivAPI:
             return sub_id
         except Exception as e:
             log.error(f"Subscription failed for {symbol}: {e}")
+            raise
+
+    async def subscribe_transactions(self, callback: Callable) -> str:
+        """Subscribe to live transactions. Returns subscription id."""
+        if callback not in self._transaction_handlers:
+            self._transaction_handlers.append(callback)
+        try:
+            resp = await self.send({"transaction": 1, "subscribe": 1})
+            sub_id = resp.get("subscription", {}).get("id", "")
+            log.info(f"Subscribed to transactions | sub_id: {sub_id}")
+            return sub_id
+        except Exception as e:
+            log.error(f"Transaction subscription failed: {e}")
             raise
 
     async def unsubscribe(self, sub_id: str):

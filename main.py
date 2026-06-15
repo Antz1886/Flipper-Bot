@@ -29,7 +29,10 @@ from modules.risk_manager import calculate_stake, get_balance, CircuitBreakerTri
 from modules.order_executor import (
     place_multiplier_contract,
     has_open_contract,
+    get_open_contracts,
     get_last_contract_result,
+    update_contract_limit_order,
+    get_contract_details,
 )
 from modules.logger import setup_logging, log_trade, log_trade_outcome, log_session_event
 
@@ -49,22 +52,37 @@ class ActiveZone:
     balance_snapshot:   float
     created_at:         float = 0.0   # time.time() when zone was armed
 
+@dataclass
+class ActiveTrade:
+    """Holds details of a running multiplier contract."""
+    contract_id:        int
+    entry_price:        float
+    direction:          str
+    stop_loss_amount:   float
+    take_profit_amount: float
+    stake:              float
+    is_break_even:      bool = False
+
 # Dicts to track state per symbol
 _active_zones: Dict[str, Optional[ActiveZone]] = {}
+_active_trades: Dict[str, Optional[ActiveTrade]] = {}
 _in_trades:    Dict[str, bool] = {}
 _last_trade_time: Dict[str, float] = {}
 _tick_locks:   Dict[str, asyncio.Lock] = {}
+_scan_lock:    asyncio.Lock = None  # Will be initialized in main() or defined here
 
 PID_FILE = "bot.pid"
 
 
 def _init_symbol_state():
     """Initialize per-symbol state dicts. Called after SYMBOLS is finalized."""
-    global _active_zones, _in_trades, _last_trade_time, _tick_locks
+    global _active_zones, _active_trades, _in_trades, _last_trade_time, _tick_locks, _scan_lock
     _active_zones    = {s: None for s in config.SYMBOLS}
+    _active_trades   = {s: None for s in config.SYMBOLS}
     _in_trades       = {s: False for s in config.SYMBOLS}
     _last_trade_time = {s: 0.0 for s in config.SYMBOLS}
     _tick_locks      = {s: asyncio.Lock() for s in config.SYMBOLS}
+    _scan_lock       = asyncio.Lock()
 
 
 def _count_open_trades() -> int:
@@ -151,6 +169,29 @@ async def sync_portfolio_state():
                 _in_trades[symbol] = True
                 _last_trade_time[symbol] = time.time()
                 log.info(f"📋 Portfolio sync: Active contract found for {symbol} — marking in-trade.")
+                
+                # Fetch details to populate _active_trades
+                contracts = await get_open_contracts(symbol)
+                if contracts:
+                    cid = contracts[0].get("contract_id")
+                    details = await get_contract_details(cid)
+                    if details:
+                        entry = float(details.get("entry_spot", 0) or 0)
+                        stake = float(details.get("buy_price", 0) or 0)
+                        limit_order = details.get("limit_order", {})
+                        sl_amt = float(limit_order.get("stop_loss", {}).get("order_amount", 0) or 0)
+                        tp_amt = float(limit_order.get("take_profit", {}).get("order_amount", 0) or 0)
+                        
+                        _active_trades[symbol] = ActiveTrade(
+                            contract_id=cid,
+                            entry_price=entry,
+                            direction="BUY" if "MULTUP" in details.get("contract_type", "") else "SELL",
+                            stop_loss_amount=sl_amt,
+                            take_profit_amount=tp_amt,
+                            stake=stake,
+                            is_break_even=False
+                        )
+                        log.info(f"📋 Portfolio sync: Loaded trade details for {symbol} (ID: {cid}, Entry: {entry})")
                 synced_symbol = True
                 break
             elif status is False:
@@ -178,14 +219,49 @@ async def on_tick(tick: dict):
     Called on every live tick from the Deriv subscription.
     Checks if price has entered the active OB zone for that specific symbol.
     Uses per-symbol locks to prevent duplicate entries.
+    Also handles Break-Even Stop Loss protection checks.
     """
-    global _active_zones, _in_trades
+    global _active_zones, _active_trades, _in_trades
 
     if not _portfolio_synced:
         return
 
     symbol = tick.get("symbol")
-    if not symbol or symbol not in _active_zones:
+    if not symbol:
+        return
+
+    # ─── Break-Even Stop Loss Protection Check ──────────────────────────────────
+    trade = _active_trades.get(symbol)
+    if trade and not trade.is_break_even:
+        bid = float(tick.get("bid", 0))
+        ask = float(tick.get("ask", 0))
+        current_price = ask if trade.direction == "BUY" else bid
+        
+        # Calculate price change percentage
+        if trade.direction == "BUY":
+            change_pct = (current_price - trade.entry_price) / trade.entry_price
+        else:
+            change_pct = (trade.entry_price - current_price) / trade.entry_price
+            
+        multiplier = config.SYMBOL_MULTIPLIERS.get(symbol, 50)
+        unrealized_profit = trade.stake * multiplier * change_pct
+        
+        # Target for break-even: if profit reaches 50% of take_profit_amount
+        trigger_profit = trade.take_profit_amount * 0.5
+        if unrealized_profit >= trigger_profit:
+            log.info(f"🛡️ Break-Even Triggered for {symbol} | Profit: ${unrealized_profit:.2f} >= Trigger: ${trigger_profit:.2f}")
+            
+            # Send contract update to set stop loss to 0 (break-even)
+            async def run_update(cid, sym):
+                success = await update_contract_limit_order(cid, stop_loss=0.0)
+                if success:
+                    t = _active_trades.get(sym)
+                    if t and t.contract_id == cid:
+                        t.is_break_even = True
+                        log.info(f"🛡️ Break-Even Stop successfully set for contract {cid} on {sym}")
+            asyncio.create_task(run_update(trade.contract_id, symbol))
+
+    if symbol not in _active_zones:
         return
 
     # Quick pre-check without lock
@@ -250,14 +326,36 @@ async def on_tick(tick: dict):
             _in_trades[symbol] = False  # Allow retry on next scan if trade failed
         else:
             _last_trade_time[symbol] = time.time()
+            # Populate active trade details
+            buy_resp = result.get("buy", {})
+            contract_id = buy_resp.get("contract_id")
+            _active_trades[symbol] = ActiveTrade(
+                contract_id=contract_id,
+                entry_price=sig.entry_price,
+                direction=sig.direction,
+                stop_loss_amount=zone.stop_loss_amount,
+                take_profit_amount=zone.take_profit_amount,
+                stake=zone.stake,
+                is_break_even=False
+            )
 
 
 # ─── Scan Cycle ───────────────────────────────────────────────────────────────
 
 async def run_scan_cycle() -> bool:
     """
-    One full scan across all symbols.
-    Returns False to stop the bot, True to continue.
+    One full scan across all symbols (wrapped in _scan_lock).
+    """
+    if _scan_lock.locked():
+        log.debug("Scan cycle already in progress — skipping concurrent execution.")
+        return True
+    async with _scan_lock:
+        return await _run_scan_cycle_inner()
+
+
+async def _run_scan_cycle_inner() -> bool:
+    """
+    Inner scan cycle logic.
     """
     global _active_zones, _in_trades
 
@@ -475,6 +573,62 @@ async def health_monitor():
             await asyncio.sleep(10)  # Brief pause before retrying loop
 
 
+# ─── Transaction Stream Handler ───────────────────────────────────────────────
+
+async def on_transaction_event(tx: dict):
+    """
+    Callback for live transaction events from Deriv stream.
+    Updates bot state instantly when trades open or settle.
+    """
+    global _active_trades, _in_trades, _active_zones
+    
+    action = tx.get("action")
+    symbol = tx.get("symbol")
+    contract_id = tx.get("contract_id")
+    amount = float(tx.get("amount", 0) or 0)
+    
+    if not symbol or symbol not in config.SYMBOLS:
+        return
+        
+    if action == "buy":
+        log.info(f"🔔 Transaction Event: Trade Opened | {symbol} | ID: {contract_id}")
+        _in_trades[symbol] = True
+        _last_trade_time[symbol] = time.time()
+        
+        # Details will be populated by the tick handler result once placed,
+        # but as a fallback, we can fetch it if needed.
+        if _active_trades.get(symbol) is None:
+            async def load_details(cid, sym):
+                details = await get_contract_details(cid)
+                if details:
+                    entry = float(details.get("entry_spot", 0) or 0)
+                    stake = float(details.get("buy_price", 0) or 0)
+                    limit_order = details.get("limit_order", {})
+                    sl_amt = float(limit_order.get("stop_loss", {}).get("order_amount", 0) or 0)
+                    tp_amt = float(limit_order.get("take_profit", {}).get("order_amount", 0) or 0)
+                    _active_trades[sym] = ActiveTrade(
+                        contract_id=cid,
+                        entry_price=entry,
+                        direction="BUY" if "MULTUP" in details.get("contract_type", "") else "SELL",
+                        stop_loss_amount=sl_amt,
+                        take_profit_amount=tp_amt,
+                        stake=stake,
+                        is_break_even=False
+                    )
+                    log.info(f"🔔 Transaction Event: Sync'd details for contract {cid} on {sym}")
+            asyncio.create_task(load_details(contract_id, symbol))
+
+    elif action == "sell":
+        log.info(f"🔔 Transaction Event: Trade Settled | {symbol} | ID: {contract_id} | Payout: ${amount:.2f}")
+        _in_trades[symbol] = False
+        _active_trades[symbol] = None
+        _active_zones[symbol] = None
+        
+        # Trigger immediate scan cycle
+        log.info("🔔 Transaction Event: Trade cleared — triggering immediate scan cycle.")
+        asyncio.create_task(run_scan_cycle())
+
+
 # ─── Signal Handlers ──────────────────────────────────────────────────────────
 
 def _handle_signal(sig, frame):
@@ -550,6 +704,14 @@ async def main():
     for symbol in config.SYMBOLS:
         sid = await get_api().subscribe_ticks(symbol, on_tick)
         if sid: sub_ids.append(sid)
+
+    # ── Subscribe to live transaction events ──────────────────────────────────
+    try:
+        tx_sub_id = await get_api().subscribe_transactions(on_transaction_event)
+        if tx_sub_id:
+            sub_ids.append(tx_sub_id)
+    except Exception as e:
+        log.error(f"Failed to subscribe to transaction events: {e}")
 
     # ── Start health monitor ──────────────────────────────────────────────────
     monitor_task = asyncio.create_task(health_monitor())
