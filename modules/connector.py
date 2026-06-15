@@ -20,7 +20,8 @@ try:
 except ImportError:
     from websockets.protocol import State
 
-from config import DERIV_WS_URL, DERIV_API_TOKEN, MAX_RETRIES, RETRY_DELAY_S
+import config
+from config import DERIV_REST_URL, DERIV_WS_URL, DERIV_API_TOKEN, MAX_RETRIES, RETRY_DELAY_S, DEMO_MODE
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,27 @@ class DerivAPI:
         self.authorized: bool = False
         self.is_active: bool = False
         self.connection_healthy: bool = False  # True only when WS is confirmed alive
+
+    async def _fetch_rest(self, path: str, method: str = "GET", payload: dict = None) -> dict:
+        """Perform an asynchronous REST API call to Deriv."""
+        import urllib.request
+        import json
+        
+        url = f"{DERIV_REST_URL}{path}"
+        
+        def blocking_req():
+            req = urllib.request.Request(url, method=method)
+            req.add_header("Authorization", f"Bearer {DERIV_API_TOKEN}")
+            req.add_header("Deriv-App-ID", str(config.DERIV_APP_ID))
+            req.add_header("User-Agent", "Mozilla/5.0")
+            if payload is not None:
+                req.data = json.dumps(payload).encode("utf-8")
+                req.add_header("Content-Type", "application/json")
+            
+            with urllib.request.urlopen(req) as response:
+                return json.loads(response.read().decode("utf-8"))
+                
+        return await asyncio.to_thread(blocking_req)
 
     async def _cleanup(self):
         """Cancel receiver task, heartbeat task, close websocket, and reject pending futures."""
@@ -157,30 +179,65 @@ class DerivAPI:
     # ── Public API ────────────────────────────────────────────────────────────
 
     async def connect(self) -> bool:
-        """Open WebSocket, start receiver, authorize. Returns True on success."""
+        """Open WebSocket using REST account selection and OTP. Returns True on success."""
         for attempt in range(1, MAX_RETRIES + 1):
             await self._cleanup()
             try:
+                # 1. Fetch account list
+                log.info(f"Fetching account list from REST API... (attempt {attempt}/{MAX_RETRIES})")
+                accounts_resp = await self._fetch_rest("/trading/v1/options/accounts")
+                accounts = accounts_resp.get("data", [])
+                if not accounts:
+                    raise ValueError("No accounts returned from Deriv API.")
+                
+                # 2. Select target account based on DEMO_MODE
+                target_type = "demo" if DEMO_MODE else "real"
+                selected_account = None
+                for acc in accounts:
+                    if acc.get("account_type") == target_type and acc.get("status") == "active":
+                        selected_account = acc
+                        break
+                
+                if not selected_account:
+                    # Fallback to any account of target type
+                    for acc in accounts:
+                        if acc.get("account_type") == target_type:
+                            selected_account = acc
+                            break
+                            
+                if not selected_account:
+                    raise ValueError(f"Could not find a valid {target_type} account.")
+                
+                account_id = selected_account.get("account_id")
+                log.info(f"Selected {target_type} account: {account_id}")
+                
+                # 3. Get OTP for connection
+                otp_resp = await self._fetch_rest(f"/trading/v1/options/accounts/{account_id}/otp", method="POST")
+                otp_url = otp_resp.get("data", {}).get("url")
+                if not otp_url:
+                    raise ValueError("Failed to retrieve OTP URL.")
+                
+                # 4. Connect to WebSocket using the OTP URL
+                log.info(f"Connecting to WebSocket using OTP...")
                 self._ws = await websockets.connect(
-                    DERIV_WS_URL,
-                    ping_interval=None,  # Disable library keepalive to prevent 1011 errors
+                    otp_url,
+                    ping_interval=None,
                     ping_timeout=None,
                     close_timeout=10,
                     open_timeout=10,
                 )
                 self.is_active = True
                 self._recv_task = asyncio.create_task(self._recv_loop())
-                log.info(f"🌐 WebSocket connected to Deriv API (attempt {attempt})")
+                log.info(f"🌐 WebSocket connected to Deriv API")
 
-                # Authorize
-                resp = await self.send({"authorize": DERIV_API_TOKEN})
-                info = resp.get("authorize", {})
-                self.balance  = float(info.get("balance", 0))
-                self.currency = info.get("currency", "USD")
+                # The OTP connection is pre-authenticated!
+                # We can store the selected account details
+                self.balance  = float(selected_account.get("balance", 0))
+                self.currency = selected_account.get("currency", "USD")
                 self.authorized = True
                 self.connection_healthy = True
                 log.info(
-                    f"Authorized | Account: {info.get('email','?')} | "
+                    f"Authorized | Account: {selected_account.get('email','?')} | "
                     f"Balance: {self.currency} {self.balance:.2f}"
                 )
 
@@ -199,6 +256,7 @@ class DerivAPI:
 
         log.critical("Failed to connect to Deriv API after all retries.")
         return False
+
 
     async def send(self, payload: dict) -> dict:
         """Send a request and await its response. Thread-safe via req_id."""

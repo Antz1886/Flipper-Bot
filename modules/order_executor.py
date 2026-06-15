@@ -47,39 +47,64 @@ async def place_multiplier_contract(
         log.error(f"No valid multiplier for {signal.symbol} — skipping trade.")
         return None
     
-    payload = {
-        "buy": 1,
-        "price": stake,
-        "parameters": {
-            "amount":        stake,
-            "contract_type": contract_type,
-            "symbol":        signal.symbol,
-            "multiplier":    multiplier,
-            "basis":         "stake",
-            "currency":      "USD",
-            "limit_order": {
-                "stop_loss":   stop_loss_amount,
-                "take_profit": take_profit_amount,
-            },
-        },
+    proposal_payload = {
+        "proposal": 1,
+        "amount": stake,
+        "basis": "stake",
+        "contract_type": contract_type,
+        "currency": "USD",
+        "underlying_symbol": signal.symbol,
+        "multiplier": multiplier,
+        "limit_order": {
+            "stop_loss": stop_loss_amount,
+            "take_profit": take_profit_amount,
+        }
     }
 
     async with _exec_lock:
         log.info(
-            f"→ Executing MARKET BUY | {contract_type} | {signal.symbol} | "
+            f"→ Requesting Proposal | {contract_type} | {signal.symbol} | "
             f"Stake: ${stake:.2f} | Multiplier: {multiplier}x | "
             f"SL: ${stop_loss_amount:.2f} | TP: ${take_profit_amount:.2f}"
         )
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                # Double-check one last time before sending the buy payload
+                # Double-check one last time before execution
                 open_status = await has_open_contract(signal.symbol)
                 if open_status is True:
                     log.warning(f"Aborting execution: Active contract already detected for {signal.symbol}")
                     return None
 
-                resp = await api.send(payload)
+                # 1. Fetch proposal
+                prop_resp = await api.send(proposal_payload)
+                if "error" in prop_resp:
+                    err = prop_resp["error"]
+                    log.warning(
+                        f"Proposal request failed (attempt {attempt}/{MAX_RETRIES}): "
+                        f"[{err.get('code')}] {err.get('message')}"
+                    )
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(RETRY_DELAY_S)
+                    continue
+                
+                proposal = prop_resp.get("proposal", {})
+                proposal_id = proposal.get("id")
+                ask_price = proposal.get("ask_price")
+                if not proposal_id:
+                    log.warning(f"No proposal ID in response (attempt {attempt}/{MAX_RETRIES})")
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(RETRY_DELAY_S)
+                    continue
+
+                # 2. Buy contract
+                log.info(f"→ Purchasing contract using proposal {proposal_id}...")
+                buy_payload = {
+                    "buy": proposal_id,
+                    "price": ask_price,
+                    "subscribe": 1
+                }
+                resp = await api.send(buy_payload)
                 
                 # Check for API errors in the response
                 if "error" in resp:

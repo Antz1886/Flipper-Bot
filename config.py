@@ -22,6 +22,7 @@ if not DERIV_API_TOKEN or DERIV_API_TOKEN == "your_api_token_here":
         "Please ensure your .env file is present and contains a valid DERIV_API_TOKEN."
     )
 
+DERIV_REST_URL  = "https://api.derivws.com"
 DERIV_WS_URL    = f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID}"
 
 # ─── Symbol & Timeframe ───────────────────────────────────────────────────────
