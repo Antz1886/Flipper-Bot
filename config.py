@@ -87,6 +87,13 @@ MAX_RETRIES     = 3
 RETRY_DELAY_S   = 2.0
 MAGIC_COMMENT   = "SMC_MICRO_BOT"   # Stored in contract purchase_time comment
 
+# ─── Advanced Filters ─────────────────────────────────────────────────────────
+HTF_TF_S = 3600             # 1 Hour macro trend timeframe (seconds)
+HTF_EMA_PERIOD = 200        # Period for macro trend EMA
+MIN_ADX_TREND = 20.0        # Minimum ADX to allow trading (M5 timeframe)
+USE_REJECTION_FILTER = True # Enable tick-based rejection entry instead of limit entry
+REJECTION_TRIGGER_PCT = 0.15 # Bounces must exceed 15% of OB height to confirm rejection
+
 # ─── AI Filter ────────────────────────────────────────────────────────────────
 AI_VETO_THRESHOLD = 0.45   # Calibrated threshold (realistic win probabilities range from 18% to 51%)
 

@@ -21,7 +21,7 @@ from smartmoneyconcepts import smc
 import os
 import joblib
 
-from config import SWING_LENGTH, RISK_REWARD_RATIO, OB_BUFFER_PCT, AI_VETO_THRESHOLD
+from config import SWING_LENGTH, RISK_REWARD_RATIO, OB_BUFFER_PCT, AI_VETO_THRESHOLD, HTF_EMA_PERIOD, MIN_ADX_TREND
 
 log = logging.getLogger(__name__)
 
@@ -242,6 +242,7 @@ async def detect_signal(
     symbol:          str,
     primary_ohlc:    pd.DataFrame,
     confluence_ohlc: pd.DataFrame,
+    htf_ohlc:        pd.DataFrame,
     current_bid:     float,
     current_ask:     float,
 ) -> Optional[TradeSignal]:
@@ -250,7 +251,6 @@ async def detect_signal(
 
     Confluence rule:
       - An unmitigated FVG **and** an unmitigated OB must both exist
-        in the same direction on the PRIMARY timeframe (M5).
       - A matching unmitigated FVG on the CONFLUENCE timeframe (M15)
         adds 0.3 to the confidence score (max = 1.0).
       - Only one direction (bull or bear) is evaluated per cycle;
@@ -262,6 +262,20 @@ async def detect_signal(
     """
 
     def _analyze() -> Optional[TradeSignal]:
+
+        # ── High Timeframe Trend Filter (EMA 200 on H1) ──────────────────────
+        macro_trend = None  # "BULL" or "BEAR" or None
+        if htf_ohlc is not None and len(htf_ohlc) >= HTF_EMA_PERIOD:
+            try:
+                htf_df = htf_ohlc.copy()
+                htf_df["EMA_HTF"] = ta.ema(htf_df["close"], length=HTF_EMA_PERIOD)
+                latest_htf_ema = float(htf_df["EMA_HTF"].iloc[-1])
+                latest_htf_close = float(htf_df["close"].iloc[-1])
+                if pd.notna(latest_htf_ema) and latest_htf_ema > 0:
+                    macro_trend = "BULL" if latest_htf_close > latest_htf_ema else "BEAR"
+                    log.debug(f"{symbol} Macro Trend (H1): {macro_trend} | Close: {latest_htf_close:.4f} | EMA: {latest_htf_ema:.4f}")
+            except Exception as e:
+                log.warning(f"Failed to calculate HTF Trend for {symbol}: {e}")
 
         # ── Primary TF signals ───────────────────────────────────────────────
         bull_fvg_p, bear_fvg_p = _detect_fvg(primary_ohlc)
@@ -278,6 +292,18 @@ async def detect_signal(
         df_ai["RSI"] = ta.rsi(df_ai["close"], length=14)
         df_ai["EMA_50"] = ta.ema(df_ai["close"], length=50)
         
+        # ── Regime Detection (ADX Range Filter) ──────────────────────────────
+        try:
+            adx_df = ta.adx(df_ai["high"], df_ai["low"], df_ai["close"], length=14)
+            latest_adx = float(adx_df["ADX_14"].iloc[-1])
+            if pd.notna(latest_adx):
+                log.debug(f"{symbol} Primary ADX: {latest_adx:.2f}")
+                if latest_adx < MIN_ADX_TREND:
+                    log.debug(f"🚫 {symbol} Setup vetoed: Market ranging (ADX: {latest_adx:.1f} < {MIN_ADX_TREND})")
+                    return None
+        except Exception as e:
+            log.warning(f"Failed to calculate ADX for {symbol}: {e}")
+            
         latest_atr = df_ai["ATR"].iloc[-1]
         latest_rsi = df_ai["RSI"].iloc[-1]
         latest_ema = df_ai["EMA_50"].iloc[-1]
@@ -292,6 +318,10 @@ async def detect_signal(
 
         # ── BULLISH setup ─────────────────────────────────────────────────────
         if not bull_fvg_p.empty and not bull_ob_p.empty:
+            if macro_trend == "BEAR":
+                log.debug(f"🚫 {symbol} Bullish setup vetoed by H1 Bearish Macro Trend.")
+                return None
+
             fvg_row = bull_fvg_p.iloc[-1]
             ob_row  = bull_ob_p.iloc[-1]
 
@@ -358,6 +388,10 @@ async def detect_signal(
 
         # ── BEARISH setup ─────────────────────────────────────────────────────
         if not bear_fvg_p.empty and not bear_ob_p.empty:
+            if macro_trend == "BULL":
+                log.debug(f"🚫 {symbol} Bearish setup vetoed by H1 Bullish Macro Trend.")
+                return None
+
             fvg_row = bear_fvg_p.iloc[-1]
             ob_row  = bear_ob_p.iloc[-1]
 

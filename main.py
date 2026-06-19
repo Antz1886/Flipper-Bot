@@ -51,6 +51,8 @@ class ActiveZone:
     take_profit_amount: float
     balance_snapshot:   float
     created_at:         float = 0.0   # time.time() when zone was armed
+    tapped:             bool = False  # True when price enters OB zone
+    extreme_price:      float = 0.0   # Tracks lowest ask (BUY) or highest bid (SELL) inside OB
 
 @dataclass
 class ActiveTrade:
@@ -285,24 +287,91 @@ async def on_tick(tick: dict):
 
         bid = float(tick.get("bid", 0))
         ask = float(tick.get("ask", 0))
-        sig = _active_zones[symbol].signal
+        zone = _active_zones[symbol]
+        sig = zone.signal
 
-        zone_triggered = (
-            (sig.direction == "BUY"  and ask <= sig.entry_price) or
-            (sig.direction == "SELL" and bid >= sig.entry_price)
-        )
+        zone_triggered = False
+
+        if config.USE_REJECTION_FILTER:
+            if not zone.tapped:
+                # Check if price has entered the OB zone
+                is_inside = False
+                if sig.direction == "BUY" and ask <= sig.ob_top and ask >= sig.ob_bottom:
+                    is_inside = True
+                    zone.extreme_price = ask
+                elif sig.direction == "SELL" and bid >= sig.ob_bottom and bid <= sig.ob_top:
+                    is_inside = True
+                    zone.extreme_price = bid
+
+                if is_inside:
+                    zone.tapped = True
+                    log.info(
+                        f"🎯 OB Zone Tapped | {symbol} {sig.direction} | "
+                        f"OB range: [{sig.ob_bottom:.5f}–{sig.ob_top:.5f}] | "
+                        f"Entered at: {ask if sig.direction == 'BUY' else bid:.5f} | Rejection tracking active."
+                    )
+                return  # Wait for subsequent ticks to confirm rejection
+            else:
+                # Zone is already tapped, check for invalidation (price went past SL)
+                invalidated = False
+                if sig.direction == "BUY" and ask < sig.stop_loss:
+                    invalidated = True
+                elif sig.direction == "SELL" and bid > sig.stop_loss:
+                    invalidated = True
+
+                if invalidated:
+                    log.info(
+                        f"❌ OB Zone Invalidated | {symbol} {sig.direction} | "
+                        f"Price went past SL ({sig.stop_loss:.5f}) | "
+                        f"Tick bid/ask: {bid:.5f}/{ask:.5f} | Clearing zone."
+                    )
+                    _active_zones[symbol] = None
+                    return
+
+                # Update extreme price
+                if sig.direction == "BUY":
+                    zone.extreme_price = min(zone.extreme_price, ask)
+                else:
+                    zone.extreme_price = max(zone.extreme_price, bid)
+
+                # Calculate rejection bounce distance
+                ob_height = abs(sig.ob_top - sig.ob_bottom)
+                spread = ask - bid
+                rejection_trigger = max(ob_height * config.REJECTION_TRIGGER_PCT, spread * 1.5)
+
+                if sig.direction == "BUY" and ask >= zone.extreme_price + rejection_trigger:
+                    log.info(
+                        f"⚡ OB Zone Rejection Confirmed! | {symbol} BUY | "
+                        f"Lowest Ask: {zone.extreme_price:.5f} | "
+                        f"Current Ask: {ask:.5f} >= Trigger: {zone.extreme_price + rejection_trigger:.5f} | "
+                        f"Executing Trade!"
+                    )
+                    zone_triggered = True
+                elif sig.direction == "SELL" and bid <= zone.extreme_price - rejection_trigger:
+                    log.info(
+                        f"⚡ OB Zone Rejection Confirmed! | {symbol} SELL | "
+                        f"Highest Bid: {zone.extreme_price:.5f} | "
+                        f"Current Bid: {bid:.5f} <= Trigger: {zone.extreme_price - rejection_trigger:.5f} | "
+                        f"Executing Trade!"
+                    )
+                    zone_triggered = True
+        else:
+            # Old limit-style entry
+            zone_triggered = (
+                (sig.direction == "BUY"  and ask <= sig.entry_price) or
+                (sig.direction == "SELL" and bid >= sig.entry_price)
+            )
 
         if not zone_triggered:
             return
 
         log.info(
-            f"🎯 OB Zone HIT | {symbol} | {sig.direction} | Entry: {sig.entry_price:.5f} | "
+            f"🎯 OB Zone Entry Triggered | {symbol} | {sig.direction} | Entry: {sig.entry_price:.5f} | "
             f"Tick bid/ask: {bid:.5f}/{ask:.5f}"
         )
 
         # Set trade flag BEFORE executing — atomic dedup
         _in_trades[symbol] = True
-        zone = _active_zones[symbol]
         _active_zones[symbol] = None
 
         result = await place_multiplier_contract(
@@ -453,8 +522,9 @@ async def _run_scan_cycle_inner() -> bool:
         # ── Fetch OHLC ────────────────────────────────────────────────────────
         primary_df    = await fetch_ohlc(symbol, config.PRIMARY_TF_S)
         confluence_df = await fetch_ohlc(symbol, config.CONFLUENCE_TF_S)
+        htf_df        = await fetch_ohlc(symbol, config.HTF_TF_S)
 
-        if primary_df is None or confluence_df is None:
+        if primary_df is None or confluence_df is None or htf_df is None:
             log.warning(f"OHLC fetch failed for {symbol} — skipping.")
             continue
 
@@ -468,6 +538,7 @@ async def _run_scan_cycle_inner() -> bool:
             symbol=symbol,
             primary_ohlc=primary_df,
             confluence_ohlc=confluence_df,
+            htf_ohlc=htf_df,
             current_bid=bid,
             current_ask=ask,
         )
