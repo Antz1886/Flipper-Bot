@@ -242,7 +242,7 @@ async def get_last_contract_result(symbol: str) -> dict | None:
         return None
 
 
-async def update_contract_limit_order(contract_id: int, stop_loss: float = None, take_profit: float = None) -> bool:
+async def update_contract_limit_order(contract_id: int, stop_loss: float = None, take_profit: float = None) -> tuple[bool, str | None]:
     """Update stop loss and/or take profit for an open contract."""
     api = get_api()
     limit_order = {}
@@ -262,11 +262,11 @@ async def update_contract_limit_order(contract_id: int, stop_loss: float = None,
         if "error" in resp:
             err = resp["error"]
             log.error(f"Failed to update contract {contract_id}: [{err.get('code')}] {err.get('message')}")
-            return False
-        return True
+            return False, err.get("code")
+        return True, None
     except Exception as e:
         log.error(f"Error updating contract {contract_id}: {e}")
-        return False
+        return False, "UnknownError"
 
 
 async def get_contract_details(contract_id: int) -> dict | None:

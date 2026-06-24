@@ -255,12 +255,16 @@ async def on_tick(tick: dict):
             
             # Send contract update to set stop loss to 0 (break-even)
             async def run_update(cid, sym):
-                success = await update_contract_limit_order(cid, stop_loss=0.0)
+                success, err_code = await update_contract_limit_order(cid, stop_loss=0.0)
                 if success:
                     t = _active_trades.get(sym)
                     if t and t.contract_id == cid:
                         t.is_break_even = True
                         log.info(f"🛡️ Break-Even Stop successfully set for contract {cid} on {sym}")
+                elif err_code in ("ContractAlreadySold", "InvalidContractProposal"):
+                    log.warning(f"🛡️ Contract {cid} on {sym} already closed ({err_code}) — clearing active trade state.")
+                    _active_trades[sym] = None
+                    _in_trades[sym] = False
             asyncio.create_task(run_update(trade.contract_id, symbol))
 
     if symbol not in _active_zones:
@@ -501,6 +505,7 @@ async def _run_scan_cycle_inner() -> bool:
                     )
                 
                 _in_trades[symbol] = False
+                _active_trades[symbol] = None
                 _active_zones[symbol] = None
 
         # ── Check concurrent trade limit ──────────────────────────────────────
@@ -637,6 +642,12 @@ async def health_monitor():
                             await api.subscribe_ticks(symbol, on_tick)
                         except Exception as e:
                             log.error(f"Failed to re-subscribe to {symbol}: {e}")
+                    try:
+                        tx_sub_id = await api.subscribe_transactions(on_transaction_event)
+                        if tx_sub_id:
+                            log.info(f"Re-subscribed to transactions | sub_id: {tx_sub_id}")
+                    except Exception as e:
+                        log.error(f"Failed to re-subscribe to transaction events: {e}")
                 elif not reconnected:
                     log.error("❌ Reconnection loop stopped.")
         except Exception as e:
