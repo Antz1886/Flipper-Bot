@@ -48,7 +48,7 @@ MAX_STAKE_USD       = 100.00  # Safety cap per trade (prevents runaway sizing on
 RISK_REWARD_RATIO   = 1.5     # Optimized for high win rate and faster compounding
 
 # Live account targets ($10 real money)
-_REAL_CIRCUIT_BREAKER = 1.50
+_REAL_CIRCUIT_BREAKER = 5.00
 _REAL_TARGET          = 100.00
 
 # Demo account targets (proportionally scaled: demo starts at $10,000)

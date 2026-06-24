@@ -63,7 +63,8 @@ def calculate_stake(balance: float, signal: TradeSignal, multiplier: int) -> tup
         stake = 1.00
         strategy_mode = "[ACCOUNT FLIP]"
     else:
-        stake = balance * 0.20
+        # Use KELLY_FRACTION, but ensure it never falls below the minimum allowed stake of $1.00
+        stake = max(MIN_STAKE_USD, balance * KELLY_FRACTION)
         strategy_mode = "[GROWTH]"
 
     # 2. Structural Distances
