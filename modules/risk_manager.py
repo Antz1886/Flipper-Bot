@@ -97,3 +97,18 @@ def can_open_position(current_open: int, direction: str, balance: float, stake: 
 
 # Compatibility alias
 calculate_sizing = calculate_stake
+
+
+async def get_balance() -> float:
+    """Fetch current account balance from the Deriv API."""
+    api = get_api()
+    try:
+        resp = await api.send({"balance": 1})
+        bal = float(resp["balance"]["balance"])
+        log.debug(f"Live balance: ${bal:.4f}")
+        return bal
+    except Exception as e:
+        log.error(f"Failed to fetch balance: {e}")
+        # Fall back to cached value on connector
+        return api.balance
+
