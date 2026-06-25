@@ -107,8 +107,6 @@ async def discover_multipliers():
         try:
             resp = await api.send({
                 "contracts_for": symbol,
-                "currency": "USD",
-                "product_type": "basic",
             })
             
             available = resp.get("contracts_for", {}).get("available", [])

@@ -91,12 +91,64 @@ MAGIC_COMMENT   = "SMC_MICRO_BOT"   # Stored in contract purchase_time comment
 HTF_TF_S = 3600             # 1 Hour macro trend timeframe (seconds)
 HTF_EMA_PERIOD = 200        # Period for macro trend EMA
 MIN_ADX_TREND = 20.0        # Minimum ADX to allow trading (M5 timeframe)
-USE_REJECTION_FILTER = True # Enable tick-based rejection entry instead of limit entry
-REJECTION_TRIGGER_PCT = 0.15 # Bounces must exceed 15% of OB height to confirm rejection
+USE_REJECTION_FILTER = False # Disable tick-based rejection entry for EMA Pullback
+REJECTION_TRIGGER_PCT = 0.15 
+
+# ─── EMA-RSI Pullback Strategy Settings ───────────────────────────────────────
+FAST_EMA_PERIOD = 20
+SLOW_EMA_PERIOD = 50
+RSI_BUY_THRESHOLD = 45
+RSI_SELL_THRESHOLD = 55
+ATR_MULTIPLIER = 1.5
 
 # ─── AI Filter ────────────────────────────────────────────────────────────────
-AI_VETO_THRESHOLD = 0.45   # Calibrated threshold (realistic win probabilities range from 18% to 51%)
+USE_AI_FILTER = False       # Disable AI veto for trend pullback strategy
+AI_VETO_THRESHOLD = 0.45
+
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 LOG_FILE  = "logs/bot.log"
 TRADE_CSV = "trades.csv"
+
+# ─── Portfolio-Level Risk Controls ─────────────────────────────────────────────────────
+MAX_TOTAL_RISK = 0.02          # 2% of equity across all open positions
+MAX_OPEN_POSITIONS = 2
+MAX_LONG_EXPOSURE = 0.02        # 2% of equity long side
+MAX_SHORT_EXPOSURE = 0.02       # 2% of equity short side
+
+# ─── Equity-Curve Protection ───────────────────────────────────────────────────────
+EQ_CURVE_ROLLING_WINDOW = 50   # Number of recent trades to evaluate performance
+EQ_CURVE_MIN_PF = 1.0          # Minimum profit factor before shutdown
+EQ_CURVE_MIN_EXPECTANCY = 0.0   # Minimum expectancy before shutdown
+
+# ─── Parameter Sensitivity Ranges ─────────────────────────────────────────────────
+EMA_FAST_RANGE = (15, 25)
+EMA_SLOW_RANGE = (40, 60)
+RSI_RANGE = (35, 45)
+ADX_RANGE = (20, 35)
+
+# ─── Stress-Test Settings ───────────────────────────────────────────────────────
+STRESS_SLIPPAGE_MULTIPLIER = 2.0
+STRESS_EXECUTION_DELAY_S = 5
+STRESS_MISSING_CANDLES = True
+STRESS_API_DISCONNECT_PROB = 0.01
+STRESS_SPREAD_WIDENING = 0.02
+
+# ─── Trade-Score Buckets ───────────────────────────────────────────────────────
+TRADE_SCORE_BUCKETS = {
+    "high": (90, 100),
+    "mid": (80, 90),
+    "low": (70, 80)
+}
+
+# ─── Shadow-Mode Settings ─────────────────────────────────────────────────────
+SHADOW_MODE = True   # Record live signals without order execution
+SHADOW_DURATION_DAYS = 30
+
+# ─── Institutional Validation Targets ─────────────────────────────────────────────
+TARGET_PROFIT_FACTOR = 1.4
+TARGET_SHARPE = 1.2
+TARGET_MAX_DD = 0.15
+TARGET_RECOVERY_FACTOR = 2.0
+TARGET_MIN_TRADES = 1000
+

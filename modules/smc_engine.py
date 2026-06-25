@@ -17,11 +17,14 @@ from typing import Optional
 
 import pandas as pd
 import pandas_ta as ta
-from smartmoneyconcepts import smc
 import os
 import joblib
 
-from config import SWING_LENGTH, RISK_REWARD_RATIO, OB_BUFFER_PCT, AI_VETO_THRESHOLD, HTF_EMA_PERIOD, MIN_ADX_TREND
+from config import (
+    RISK_REWARD_RATIO, HTF_EMA_PERIOD, MIN_ADX_TREND,
+    FAST_EMA_PERIOD, SLOW_EMA_PERIOD, RSI_BUY_THRESHOLD, RSI_SELL_THRESHOLD,
+    ATR_MULTIPLIER, USE_AI_FILTER, AI_VETO_THRESHOLD
+)
 
 log = logging.getLogger(__name__)
 
@@ -215,7 +218,7 @@ def _ai_evaluate(
     Returns (win_probability, approved).
     Returns (None, True) if no model is available (pure SMC mode).
     """
-    if rf_model is None:
+    if not USE_AI_FILTER or rf_model is None:
         return None, True
     
     try:
@@ -247,22 +250,10 @@ async def detect_signal(
     current_ask:     float,
 ) -> Optional[TradeSignal]:
     """
-    Scan for a high-confluence SMC trade setup.
-
-    Confluence rule:
-      - An unmitigated FVG **and** an unmitigated OB must both exist
-      - A matching unmitigated FVG on the CONFLUENCE timeframe (M15)
-        adds 0.3 to the confidence score (max = 1.0).
-      - Only one direction (bull or bear) is evaluated per cycle;
-        the one with the freshest OB wins.
-
-    Entry logic (pending LIMIT order):
-      BUY  → limit at OB proximal (Top),  SL below OB distal (Bottom)
-      SELL → limit at OB proximal (Bottom), SL above OB distal (Top)
+    Scan for a trend-following pullback setup (EMA + RSI + ADX).
     """
 
     def _analyze() -> Optional[TradeSignal]:
-
         # ── High Timeframe Trend Filter (EMA 200 on H1) ──────────────────────
         macro_trend = None  # "BULL" or "BEAR" or None
         if htf_ohlc is not None and len(htf_ohlc) >= HTF_EMA_PERIOD:
@@ -277,184 +268,99 @@ async def detect_signal(
             except Exception as e:
                 log.warning(f"Failed to calculate HTF Trend for {symbol}: {e}")
 
-        # ── Primary TF signals ───────────────────────────────────────────────
-        bull_fvg_p, bear_fvg_p = _detect_fvg(primary_ohlc)
-        bull_ob_p,  bear_ob_p  = _detect_ob(primary_ohlc)
-
-        # ── Confluence TF FVG (direction-aware) ──────────────────────────────
-        bull_fvg_c, bear_fvg_c = _detect_fvg(confluence_ohlc)
-        
-        # ── Compute TA Features for AI ───────────────────────────────────────
-        latest_atr, latest_rsi, price_vs_ema = 0.0, 0.0, 0.0
-        df_ai = primary_ohlc.copy()
-        
-        df_ai["ATR"] = ta.atr(df_ai["high"], df_ai["low"], df_ai["close"], length=14)
-        df_ai["RSI"] = ta.rsi(df_ai["close"], length=14)
-        df_ai["EMA_50"] = ta.ema(df_ai["close"], length=50)
-        
-        # ── Regime Detection (ADX Range Filter) ──────────────────────────────
+        # ── Primary TF indicators ───────────────────────────────────────────
+        df = primary_ohlc.copy()
         try:
-            adx_df = ta.adx(df_ai["high"], df_ai["low"], df_ai["close"], length=14)
-            latest_adx = float(adx_df["ADX_14"].iloc[-1])
-            if pd.notna(latest_adx):
-                log.debug(f"{symbol} Primary ADX: {latest_adx:.2f}")
-                if latest_adx < MIN_ADX_TREND:
-                    log.debug(f"🚫 {symbol} Setup vetoed: Market ranging (ADX: {latest_adx:.1f} < {MIN_ADX_TREND})")
-                    return None
-        except Exception as e:
-            log.warning(f"Failed to calculate ADX for {symbol}: {e}")
+            df["EMA_FAST"] = ta.ema(df["close"], length=FAST_EMA_PERIOD)
+            df["EMA_SLOW"] = ta.ema(df["close"], length=SLOW_EMA_PERIOD)
+            df["RSI"] = ta.rsi(df["close"], length=14)
+            df["ATR"] = ta.atr(df["high"], df["low"], df["close"], length=14)
+            adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
             
-        latest_atr = df_ai["ATR"].iloc[-1]
-        latest_rsi = df_ai["RSI"].iloc[-1]
-        latest_ema = df_ai["EMA_50"].iloc[-1]
-        current_close = float(df_ai["close"].iloc[-1])
-        
-        if pd.notna(latest_ema) and latest_ema != 0:
-            price_vs_ema = (current_close - latest_ema) / latest_ema
-        
-        # Handle NaN values
-        if pd.isna(latest_atr): latest_atr = 0.0
-        if pd.isna(latest_rsi): latest_rsi = 50.0  # neutral default
+            latest_fast_ema = float(df["EMA_FAST"].iloc[-1])
+            latest_slow_ema = float(df["EMA_SLOW"].iloc[-1])
+            latest_rsi = float(df["RSI"].iloc[-1])
+            latest_atr = float(df["ATR"].iloc[-1])
+            latest_adx = float(adx_df["ADX_14"].iloc[-1])
+        except Exception as e:
+            log.warning(f"Failed to calculate primary indicators for {symbol}: {e}")
+            return None
 
-        # ── BULLISH setup ─────────────────────────────────────────────────────
-        if not bull_fvg_p.empty and not bull_ob_p.empty:
+        # ── Trend Strength Filter (ADX) ──────────────────────────────────────
+        if pd.notna(latest_adx):
+            log.debug(f"{symbol} Primary ADX: {latest_adx:.2f}")
+            if latest_adx < MIN_ADX_TREND:
+                log.debug(f"🚫 {symbol} Setup vetoed: Market ranging (ADX: {latest_adx:.1f} < {MIN_ADX_TREND})")
+                return None
+
+        current_close = float(df["close"].iloc[-1])
+        current_low = float(df["low"].iloc[-1])
+        current_high = float(df["high"].iloc[-1])
+
+        # ── BULLISH Trend pullback setup (BUY) ──────────────────────────────────
+        if latest_fast_ema > latest_slow_ema:
             if macro_trend == "BEAR":
-                log.debug(f"🚫 {symbol} Bullish setup vetoed by H1 Bearish Macro Trend.")
+                log.debug(f"🚫 {symbol} Bullish pullback setup vetoed by H1 Bearish Macro Trend.")
                 return None
 
-            fvg_row = bull_fvg_p.iloc[-1]
-            ob_row  = bull_ob_p.iloc[-1]
+            # Pullback condition: low touches or goes below EMA 20, but close stays above EMA 50
+            if current_low <= latest_fast_ema and current_close >= latest_slow_ema:
+                if latest_rsi <= RSI_BUY_THRESHOLD:
+                    entry = latest_fast_ema
+                    sl = latest_slow_ema - (ATR_MULTIPLIER * latest_atr)
+                    tp = _compute_tp(entry, sl, "BUY")
+                    
+                    sig = TradeSignal(
+                        symbol=symbol, direction="BUY",
+                        entry_price=round(entry, 6),
+                        stop_loss=round(sl, 6),
+                        take_profit=round(tp, 6),
+                        signal_type="LIMIT",
+                        ob_top=latest_fast_ema, ob_bottom=latest_slow_ema,
+                        fvg_top=0.0, fvg_bottom=0.0,
+                        confidence=1.0,
+                    )
+                    log.info(
+                        f"[BULL PULLBACK] {symbol} | Entry {sig.entry_price} | "
+                        f"SL {sig.stop_loss} | TP {sig.take_profit} | "
+                        f"RSI {latest_rsi:.1f} | ADX {latest_adx:.1f}"
+                    )
+                    return sig
 
-            ob_top    = float(ob_row["Top"])
-            ob_bottom = float(ob_row["Bottom"])
-
-            # Proximal = Top of bullish OB (price retraces DOWN toward it)
-            entry = ob_top
-            # Distal = Bottom; SL placed a 5% buffer below the distal edge
-            sl_buffer = (ob_top - ob_bottom) * OB_BUFFER_PCT
-            sl = ob_bottom - sl_buffer
-            tp = _compute_tp(entry, sl, "BUY")
-
-            # Price must currently be above the OB (not yet tested)
-            if current_bid > ob_top:
-                conf = 0.7 + (0.3 if not bull_fvg_c.empty else 0.0)
-                
-                # Check for duplicate veto
-                last_vetoed = _last_logged_vetoes.get(symbol)
-                is_duplicate = (
-                    last_vetoed is not None
-                    and last_vetoed["direction"] == "BUY"
-                    and abs(last_vetoed["entry_price"] - entry) / entry < 0.001
-                )
-                
-                # AI evaluation
-                features = _build_ai_features(
-                    "BUY", ob_top, ob_bottom, entry, current_close,
-                    df_ai, latest_atr, latest_rsi, price_vs_ema
-                )
-                prob_win, approved = _ai_evaluate(symbol, "BUY", features, entry, is_duplicate)
-                
-                if not approved:
-                    if not is_duplicate:
-                        _last_logged_vetoes[symbol] = {
-                            "direction": "BUY",
-                            "entry_price": entry
-                        }
-                    return None
-                
-                # Clear veto cache on approval
-                _last_logged_vetoes.pop(symbol, None)
-                
-                if prob_win is not None:
-                    conf = prob_win
-                
-                sig = TradeSignal(
-                    symbol=symbol, direction="BUY",
-                    entry_price=round(entry, 6),
-                    stop_loss=round(sl, 6),
-                    take_profit=round(tp, 6),
-                    signal_type="LIMIT",
-                    ob_top=ob_top, ob_bottom=ob_bottom,
-                    fvg_top=float(fvg_row["Top"]),
-                    fvg_bottom=float(fvg_row["Bottom"]),
-                    confidence=conf,
-                )
-                log.info(
-                    f"[BULL] {symbol} | Entry {sig.entry_price} | "
-                    f"SL {sig.stop_loss} | TP {sig.take_profit} | "
-                    f"Conf {conf:.0%}"
-                )
-                return sig
-
-        # ── BEARISH setup ─────────────────────────────────────────────────────
-        if not bear_fvg_p.empty and not bear_ob_p.empty:
+        # ── BEARISH Trend pullback setup (SELL) ──────────────────────────────────
+        elif latest_fast_ema < latest_slow_ema:
             if macro_trend == "BULL":
-                log.debug(f"🚫 {symbol} Bearish setup vetoed by H1 Bullish Macro Trend.")
+                log.debug(f"🚫 {symbol} Bearish pullback setup vetoed by H1 Bullish Macro Trend.")
                 return None
 
-            fvg_row = bear_fvg_p.iloc[-1]
-            ob_row  = bear_ob_p.iloc[-1]
+            # Pullback condition: high touches or goes above EMA 20, but close stays below EMA 50
+            if current_high >= latest_fast_ema and current_close <= latest_slow_ema:
+                if latest_rsi >= RSI_SELL_THRESHOLD:
+                    entry = latest_fast_ema
+                    sl = latest_slow_ema + (ATR_MULTIPLIER * latest_atr)
+                    tp = _compute_tp(entry, sl, "SELL")
+                    
+                    sig = TradeSignal(
+                        symbol=symbol, direction="SELL",
+                        entry_price=round(entry, 6),
+                        stop_loss=round(sl, 6),
+                        take_profit=round(tp, 6),
+                        signal_type="LIMIT",
+                        ob_top=latest_slow_ema, ob_bottom=latest_fast_ema,
+                        fvg_top=0.0, fvg_bottom=0.0,
+                        confidence=1.0,
+                    )
+                    log.info(
+                        f"[BEAR PULLBACK] {symbol} | Entry {sig.entry_price} | "
+                        f"SL {sig.stop_loss} | TP {sig.take_profit} | "
+                        f"RSI {latest_rsi:.1f} | ADX {latest_adx:.1f}"
+                    )
+                    return sig
 
-            ob_top    = float(ob_row["Top"])
-            ob_bottom = float(ob_row["Bottom"])
-
-            # Proximal = Bottom of bearish OB (price retraces UP toward it)
-            entry = ob_bottom
-            sl_buffer = (ob_top - ob_bottom) * OB_BUFFER_PCT
-            sl = ob_top + sl_buffer
-            tp = _compute_tp(entry, sl, "SELL")
-
-            if current_ask < ob_bottom:
-                conf = 0.7 + (0.3 if not bear_fvg_c.empty else 0.0)
-                
-                # Check for duplicate veto
-                last_vetoed = _last_logged_vetoes.get(symbol)
-                is_duplicate = (
-                    last_vetoed is not None
-                    and last_vetoed["direction"] == "SELL"
-                    and abs(last_vetoed["entry_price"] - entry) / entry < 0.001
-                )
-                
-                # AI evaluation
-                features = _build_ai_features(
-                    "SELL", ob_top, ob_bottom, entry, current_close,
-                    df_ai, latest_atr, latest_rsi, price_vs_ema
-                )
-                prob_win, approved = _ai_evaluate(symbol, "SELL", features, entry, is_duplicate)
-                
-                if not approved:
-                    if not is_duplicate:
-                        _last_logged_vetoes[symbol] = {
-                            "direction": "SELL",
-                            "entry_price": entry
-                        }
-                    return None
-                
-                # Clear veto cache on approval
-                _last_logged_vetoes.pop(symbol, None)
-                
-                if prob_win is not None:
-                    conf = prob_win
-                
-                sig = TradeSignal(
-                    symbol=symbol, direction="SELL",
-                    entry_price=round(entry, 6),
-                    stop_loss=round(sl, 6),
-                    take_profit=round(tp, 6),
-                    signal_type="LIMIT",
-                    ob_top=ob_top, ob_bottom=ob_bottom,
-                    fvg_top=float(fvg_row["Top"]),
-                    fvg_bottom=float(fvg_row["Bottom"]),
-                    confidence=conf,
-                )
-                log.info(
-                    f"[BEAR] {symbol} | Entry {sig.entry_price} | "
-                    f"SL {sig.stop_loss} | TP {sig.take_profit} | "
-                    f"Conf {conf:.0%}"
-                )
-                return sig
-
-        log.debug(f"No confluence signal | {symbol}")
+        log.debug(f"No trend pullback signal | {symbol}")
         return None
 
     return await asyncio.to_thread(_analyze)
+
+
+

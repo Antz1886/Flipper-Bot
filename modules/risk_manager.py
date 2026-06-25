@@ -1,16 +1,9 @@
-"""
-modules/risk_manager.py — Kelly Criterion Stake Calculator (Deriv edition)
-With Deriv multiplier contracts, risk is controlled via dollar stake amount
-(not pip-based lot sizing). Kelly sizing is dramatically simpler here:
-
-  stake_amount = balance × KELLY_FRACTION
-  stop_loss_amount  = stake_amount          (max we can lose = full stake)
-  take_profit_amount = stake_amount × R:R   (target profit)
-
-Circuit-breaker halts trading if balance < CIRCUIT_BREAKER_USD.
+"""Portfolio‑level risk manager.
+Provides stake calculation (Kelly) and portfolio exposure checks.
 """
 
 import logging
+from typing import Tuple
 
 from modules.connector import get_api
 from modules.smc_engine import TradeSignal
@@ -23,109 +16,84 @@ from config import (
     ACCOUNT_TARGET_USD,
     DEMO_MODE,
     MAX_STAKE_PCT_OF_BALANCE,
+    # Portfolio‑level limits added to config
+    MAX_TOTAL_RISK,
+    MAX_OPEN_POSITIONS,
+    MAX_LONG_EXPOSURE,
+    MAX_SHORT_EXPOSURE,
 )
 
 log = logging.getLogger(__name__)
 
-
 class CircuitBreakerTripped(Exception):
     pass
 
-
-def calculate_stake(balance: float, signal: TradeSignal, multiplier: int) -> tuple[float, float, float] | None:
-    """
-    Calculate required margin stake, stop_loss amount, and take_profit amount
-    such that the trade is executed with a hardcoded $1.00 stake (Account Flip mode)
-    while maintaining absolute Stop Loss and Take Profit levels based on SMC engine's
-    Order Block invalidation level.
-
-    Parameters
-    ----------
-    balance    : Current account balance in USD
-    signal     : The generated TradeSignal containing entry, SL, TP levels
-    multiplier : The chosen multiplier for the contract
-
-    Returns
-    -------
-    (stake, stop_loss_amount, take_profit_amount)  — all in USD
-    None if balance is too low, or if the leverage is too high for the SL zone.
+def calculate_stake(balance: float, signal: TradeSignal, multiplier: int) -> Tuple[float, float, float] | None:
+    """Calculate stake, stop‑loss amount and take‑profit amount respecting portfolio limits.
+    Returns ``None`` if balance is below circuit‑breaker or target reached.
     """
     if balance < CIRCUIT_BREAKER_USD:
         raise CircuitBreakerTripped(
-            f"Balance ${balance:.2f} < circuit-breaker ${CIRCUIT_BREAKER_USD:.2f}"
+            f"Balance ${balance:.2f} < circuit‑breaker ${CIRCUIT_BREAKER_USD:.2f}"
         )
-
     if balance >= ACCOUNT_TARGET_USD:
-        return None  # Target reached — caller handles shutdown
+        return None  # target reached – caller should stop trading
 
-    # 1. Growth Mode Compounding: Threshold sizing gate
-    if balance < 5.00:
-        stake = 1.00
-        strategy_mode = "[ACCOUNT FLIP]"
-    else:
-        # Use KELLY_FRACTION, but ensure it never falls below the minimum allowed stake of $1.00
-        stake = max(MIN_STAKE_USD, balance * KELLY_FRACTION)
-        strategy_mode = "[GROWTH]"
+    # Kelly‑fraction sizing, bounded by min/max stake
+    stake = max(MIN_STAKE_USD, balance * KELLY_FRACTION)
+    stake = min(stake, MAX_STAKE_USD, balance * MAX_STAKE_PCT_OF_BALANCE)
 
-    # 2. Structural Distances
+    # Ensure portfolio‑level risk does not exceed limits
+    if stake / balance > MAX_TOTAL_RISK:
+        stake = balance * MAX_TOTAL_RISK
+        log.info("Stake reduced to respect MAX_TOTAL_RISK limit")
+
+    # Compute SL/TP based on R:R ratio
     sl_pct = abs(signal.entry_price - signal.stop_loss) / signal.entry_price
     tp_pct = abs(signal.take_profit - signal.entry_price) / signal.entry_price
-
-    # 3. Contract Loss Percentage at the SMC Stop Loss level
     contract_loss_pct_at_sl = sl_pct * multiplier
-    
-    # 4. Leverage Validation
-    # If the SMC SL requires losing >95% of the contract value, the contract
-    # will likely hit the 100% stop-out due to spread or micro-fluctuations
-    # BEFORE it actually hits the structural SMC Stop Loss price.
     if contract_loss_pct_at_sl > 0.95:
-        log.warning(
-            f"Leverage Too High: SMC SL implies a {contract_loss_pct_at_sl:.1%} loss of stake. "
-            f"Trade would margin call prematurely. Rejecting setup."
-        )
+        log.warning("Leverage too high – rejecting trade")
+        return None
+    if contract_loss_pct_at_sl == 0:
         return None
 
-    if contract_loss_pct_at_sl == 0:
-        return None  # Prevent division by zero
-
-    # 5. Calculate Stop Loss and Take Profit dollar amounts based on the calculated stake
-    stop_loss_amount = stake * contract_loss_pct_at_sl
-    # Ensure stop loss amount is at least 0.01 USD
-    stop_loss_amount = max(0.01, stop_loss_amount)
-
-    # Force absolute Take Profit (TP) to be exactly 3.0 * Stop Loss amount (1:3 R:R)
-    take_profit_amount = 3.0 * stop_loss_amount
-    take_profit_amount = max(0.01, take_profit_amount)
+    stop_loss_amount = max(0.01, stake * contract_loss_pct_at_sl)
+    take_profit_amount = max(0.01, stake * RISK_REWARD_RATIO * contract_loss_pct_at_sl)
 
     stake = round(stake, 2)
     stop_loss_amount = round(stop_loss_amount, 2)
     take_profit_amount = round(take_profit_amount, 2)
 
     mode_tag = "[DEMO]" if DEMO_MODE else "[LIVE]"
-
     log.info(
-        f"{mode_tag} {strategy_mode} Override Sizing | "
-        f"Stake: ${stake:.2f} | SL_Amt: ${stop_loss_amount:.2f} | "
-        f"TP_Amt: ${take_profit_amount:.2f} | "
-        f"SL dist: {sl_pct*100:.2f}% | Risking {contract_loss_pct_at_sl*100:.1f}% of stake"
+        f"{mode_tag} Stake ${stake:.2f} | SL ${stop_loss_amount:.2f} | TP ${take_profit_amount:.2f}"
     )
     return stake, stop_loss_amount, take_profit_amount
 
+# Portfolio‑level checks -------------------------------------------------------
 
-# Alias for compatibility with Growth Mode requests
+def can_open_position(current_open: int, direction: str, balance: float, stake: float) -> bool:
+    """Determine whether a new position respects portfolio caps.
+    * ``current_open`` – number of currently open contracts.
+    * ``direction`` – "BUY" or "SELL".
+    * ``balance`` – account equity.
+    * ``stake`` – dollar stake for the potential new trade.
+    """
+    if current_open >= MAX_OPEN_POSITIONS:
+        log.info("Maximum open positions reached; rejecting new trade")
+        return False
+    exposure = stake / balance
+    if direction == "BUY" and exposure > MAX_LONG_EXPOSURE:
+        log.info("Long exposure limit exceeded")
+        return False
+    if direction == "SELL" and exposure > MAX_SHORT_EXPOSURE:
+        log.info("Short exposure limit exceeded")
+        return False
+    if exposure > MAX_TOTAL_RISK:
+        log.info("Total risk limit exceeded")
+        return False
+    return True
+
+# Compatibility alias
 calculate_sizing = calculate_stake
-
-
-
-async def get_balance() -> float:
-    """Fetch current account balance from the Deriv API."""
-    api = get_api()
-    try:
-        resp = await api.send({"balance": 1})
-        bal = float(resp["balance"]["balance"])
-        log.debug(f"Live balance: ${bal:.4f}")
-        return bal
-    except Exception as e:
-        log.error(f"Failed to fetch balance: {e}")
-        # Fall back to cached value on connector
-        return api.balance
