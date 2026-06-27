@@ -37,7 +37,7 @@ async def place_tick_contract(
         "currency": "USD",
         "duration": duration,
         "duration_unit": "t",
-        "symbol": symbol
+        "underlying_symbol": symbol
     }
 
     async with _exec_lock:
