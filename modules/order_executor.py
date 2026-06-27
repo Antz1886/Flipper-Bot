@@ -18,6 +18,77 @@ log = logging.getLogger(__name__)
 _exec_lock = asyncio.Lock()
 
 
+async def place_tick_contract(
+    symbol: str,
+    contract_type: str,  # "CALL" or "PUT"
+    stake: float,
+    duration: int = 5,
+) -> dict | None:
+    """
+    Buy a Deriv Rise/Fall contract directly by specifying parameters.
+    """
+    api = get_api()
+
+    payload = {
+        "buy": 1,
+        "price": stake,
+        "parameters": {
+            "amount": stake,
+            "basis": "stake",
+            "contract_type": contract_type,
+            "currency": "USD",
+            "duration": duration,
+            "duration_unit": "t",
+            "symbol": symbol
+        }
+    }
+
+    async with _exec_lock:
+        log.info(
+            f"→ Purchasing Tick Contract | {contract_type} | {symbol} | "
+            f"Stake: ${stake:.2f} | Duration: {duration}t"
+        )
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                # Double-check active contract status before execution
+                open_status = await has_open_contract(symbol)
+                if open_status is True:
+                    log.warning(f"Aborting execution: Active contract already detected for {symbol}")
+                    return None
+
+                resp = await api.send(payload)
+                if "error" in resp:
+                    err = resp["error"]
+                    log.warning(
+                        f"Contract buy error (attempt {attempt}/{MAX_RETRIES}): "
+                        f"[{err.get('code')}] {err.get('message')}"
+                    )
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(RETRY_DELAY_S)
+                    continue
+
+                buy_resp = resp.get("buy", {})
+                contract_id  = buy_resp.get("contract_id")
+                purchase_price = buy_resp.get("buy_price")
+
+                log.info(
+                    f"✅ Tick Contract opened | ID: {contract_id} | "
+                    f"Buy price: ${purchase_price}"
+                )
+                return resp
+
+            except Exception as e:
+                log.warning(
+                    f"Contract buy failed (attempt {attempt}/{MAX_RETRIES}): {e}"
+                )
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(RETRY_DELAY_S)
+
+    log.error(f"❌ Failed to open contract after {MAX_RETRIES} attempts.")
+    return None
+
+
 async def place_multiplier_contract(
     signal:             TradeSignal,
     stake:              float,
@@ -155,9 +226,9 @@ async def get_open_contracts(symbol: str) -> list[dict] | None:
             if c.get("symbol") != symbol:
                 continue
             
-            # Filter: only keep genuinely open multiplier contracts
+            # Filter: only keep genuinely open contracts for our strategy
             contract_type = c.get("contract_type", "")
-            if "MULT" not in contract_type:
+            if not any(x in contract_type for x in ("MULT", "CALL", "PUT")):
                 continue
             
             # If the contract has a sell_time, it's already closed/settled
