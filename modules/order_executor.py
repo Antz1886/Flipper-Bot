@@ -25,27 +25,24 @@ async def place_tick_contract(
     duration: int = 5,
 ) -> dict | None:
     """
-    Buy a Deriv Rise/Fall contract directly by specifying parameters.
+    Buy a Deriv Rise/Fall contract by requesting a proposal first, then buying it.
     """
     api = get_api()
 
-    payload = {
-        "buy": 1,
-        "price": stake,
-        "parameters": {
-            "amount": stake,
-            "basis": "stake",
-            "contract_type": contract_type,
-            "currency": "USD",
-            "duration": duration,
-            "duration_unit": "t",
-            "symbol": symbol
-        }
+    proposal_payload = {
+        "proposal": 1,
+        "amount": stake,
+        "basis": "stake",
+        "contract_type": contract_type,
+        "currency": "USD",
+        "duration": duration,
+        "duration_unit": "t",
+        "symbol": symbol
     }
 
     async with _exec_lock:
         log.info(
-            f"→ Purchasing Tick Contract | {contract_type} | {symbol} | "
+            f"→ Requesting Proposal | {contract_type} | {symbol} | "
             f"Stake: ${stake:.2f} | Duration: {duration}t"
         )
 
@@ -57,7 +54,36 @@ async def place_tick_contract(
                     log.warning(f"Aborting execution: Active contract already detected for {symbol}")
                     return None
 
-                resp = await api.send(payload)
+                # 1. Fetch proposal
+                prop_resp = await api.send(proposal_payload)
+                if "error" in prop_resp:
+                    err = prop_resp["error"]
+                    log.warning(
+                        f"Proposal request failed (attempt {attempt}/{MAX_RETRIES}): "
+                        f"[{err.get('code')}] {err.get('message')}"
+                    )
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(RETRY_DELAY_S)
+                    continue
+
+                proposal = prop_resp.get("proposal", {})
+                proposal_id = proposal.get("id")
+                ask_price = proposal.get("ask_price")
+                if not proposal_id:
+                    log.warning(f"No proposal ID in response (attempt {attempt}/{MAX_RETRIES})")
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(RETRY_DELAY_S)
+                    continue
+
+                # 2. Buy contract
+                log.info(f"→ Purchasing contract using proposal {proposal_id}...")
+                buy_payload = {
+                    "buy": proposal_id,
+                    "price": ask_price,
+                    "subscribe": 1
+                }
+                resp = await api.send(buy_payload)
+
                 if "error" in resp:
                     err = resp["error"]
                     log.warning(
