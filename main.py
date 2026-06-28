@@ -37,6 +37,7 @@ _last_trade_time: Dict[str, float] = {}
 _tick_history: Dict[str, List[float]] = {}
 _tick_locks: Dict[str, asyncio.Lock] = {}
 _balance: float = 0.0
+_initial_balance: float = None
 
 PID_FILE = "bot.pid"
 DRY_RUN = False
@@ -53,7 +54,7 @@ def _init_symbol_state():
 
 async def sync_portfolio_state():
     """Sync bot trade state with the active Deriv portfolio and update balance."""
-    global _portfolio_synced, _balance
+    global _portfolio_synced, _balance, _initial_balance
     _portfolio_synced = False
 
     log.info("📋 Syncing portfolio state with Deriv...")
@@ -67,6 +68,10 @@ async def sync_portfolio_state():
     except Exception as e:
         log.error(f"Failed to fetch balance during sync: {e}")
         _balance = get_api().balance
+
+    if _initial_balance is None and _balance > 0:
+        _initial_balance = _balance
+        log.info(f"Daily starting balance set to: USD {_initial_balance:.2f}")
 
     # 2. Check for active open contracts
     for symbol in config.SYMBOLS:
@@ -227,7 +232,7 @@ async def on_transaction_event(tx: dict):
     Callback for live transaction events from Deriv stream.
     Resets trading flags and updates balance when trades settle.
     """
-    global _in_trades, _last_trade_time, _balance
+    global _in_trades, _last_trade_time, _balance, _initial_balance
 
     action = tx.get("action")
     symbol = tx.get("symbol") or tx.get("underlying_symbol")
@@ -279,6 +284,19 @@ async def on_transaction_event(tx: dict):
 
         _in_trades[symbol] = False
         _last_trade_time[symbol] = time.time()
+
+        # Check daily limits
+        if _initial_balance is not None:
+            net_daily_pnl = _balance - _initial_balance
+            log.info(f"📊 Daily PnL status: ${net_daily_pnl:.2f} (Target: +${config.DAILY_PROFIT_TARGET_USD:.2f} | Stop: -${config.DAILY_STOP_LOSS_USD:.2f})")
+            if net_daily_pnl >= config.DAILY_PROFIT_TARGET_USD:
+                log.info(f"🎉 Daily Profit Target reached! (+${net_daily_pnl:.2f} >= +${config.DAILY_PROFIT_TARGET_USD:.2f})")
+                log.info("Stopping trading to lock in profits.")
+                _shutdown_event.set()
+            elif net_daily_pnl <= -config.DAILY_STOP_LOSS_USD:
+                log.info(f"🛑 Daily Stop Loss hit! (-${-net_daily_pnl:.2f} <= -${config.DAILY_STOP_LOSS_USD:.2f})")
+                log.info("Stopping trading to protect capital.")
+                _shutdown_event.set()
 
 
 # ─── Health Monitor ───────────────────────────────────────────────────────────
