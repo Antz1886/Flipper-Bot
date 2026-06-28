@@ -249,7 +249,8 @@ async def get_open_contracts(symbol: str) -> list[dict] | None:
         
         open_contracts = []
         for c in contracts:
-            if c.get("symbol") != symbol:
+            c_symbol = c.get("symbol") or c.get("underlying_symbol")
+            if c_symbol != symbol:
                 continue
             
             # Filter: only keep genuinely open contracts for our strategy
@@ -331,7 +332,8 @@ async def get_last_contract_result(symbol: str) -> dict | None:
         })
         transactions = resp.get("profit_table", {}).get("transactions", [])
         for t in transactions:
-            if t.get("symbol") == symbol:
+            t_symbol = t.get("symbol") or t.get("underlying_symbol")
+            if t_symbol == symbol:
                 return t
         return None
     except Exception as e:

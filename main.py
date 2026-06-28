@@ -204,7 +204,7 @@ async def on_transaction_event(tx: dict):
     global _in_trades, _last_trade_time, _balance
 
     action = tx.get("action")
-    symbol = tx.get("symbol")
+    symbol = tx.get("symbol") or tx.get("underlying_symbol")
     contract_id = tx.get("contract_id")
     amount = float(tx.get("amount", 0) or 0)
 
