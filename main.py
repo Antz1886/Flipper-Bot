@@ -3,6 +3,9 @@ main.py — Async Orchestrator (Deriv Tick-Momentum edition)
 Small Account Trading Bot | $10 → $100 | Tick Auto-Correlation
 """
 
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+
 import asyncio
 import logging
 import signal
@@ -16,9 +19,11 @@ from modules.connector import get_api
 from modules.risk_manager import calculate_stake, can_open_position, CircuitBreakerTripped
 from modules.order_executor import (
     place_tick_contract,
+    place_multiplier_contract,
     has_open_contract,
     get_last_contract_result,
 )
+from modules.smc_engine import TradeSignal
 from modules.logger import setup_logging, log_trade_outcome, log_session_event
 
 log = logging.getLogger(__name__)
@@ -180,12 +185,33 @@ async def on_tick(tick: dict):
         _in_trades[symbol] = True
         _last_trade_time[symbol] = now
 
-        result = await place_tick_contract(
-            symbol=symbol,
-            contract_type=direction,
-            stake=stake,
-            duration=config.TICK_DURATION,
-        )
+        if config.USE_MULTIPLIERS:
+            sig = TradeSignal(
+                symbol=symbol,
+                direction="BUY" if direction == "CALL" else "SELL",
+                entry_price=midpoint,
+                stop_loss=0.0,
+                take_profit=0.0,
+                signal_type="LIMIT",
+                ob_top=0.0,
+                ob_bottom=0.0,
+                fvg_top=0.0,
+                fvg_bottom=0.0,
+                confidence=1.0,
+            )
+            result = await place_multiplier_contract(
+                signal=sig,
+                stake=stake,
+                stop_loss_amount=config.MULTIPLIER_SL_USD,
+                take_profit_amount=config.MULTIPLIER_TP_USD,
+            )
+        else:
+            result = await place_tick_contract(
+                symbol=symbol,
+                contract_type=direction,
+                stake=stake,
+                duration=config.TICK_DURATION,
+            )
 
         if not result:
             log.warning(f"❌ Contract placement failed for {symbol}. Releasing lock.")
@@ -219,8 +245,17 @@ async def on_transaction_event(tx: dict):
     elif action == "sell":
         log.info(f"🔔 Transaction Event: Trade Settled | {symbol} | ID: {contract_id} | Payout: ${amount:.2f}")
         
-        # Payout = 0 on loss, and payout > 0 on win. Net PnL is payout - stake
-        pnl = amount - config.TRADE_STAKE
+        pnl = 0.0
+        if config.USE_MULTIPLIERS:
+            # Multipliers can settle with different SL/TP bounds, so we query the profit table
+            outcome = await get_last_contract_result(symbol)
+            if outcome and str(outcome.get("contract_id")) == str(contract_id):
+                pnl = float(outcome.get("profit", 0))
+            else:
+                pnl = amount - config.TRADE_STAKE
+        else:
+            pnl = amount - config.TRADE_STAKE
+            
         res_str = "WIN" if pnl > 0 else "LOSS"
 
         # Update balance

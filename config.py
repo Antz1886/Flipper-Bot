@@ -30,8 +30,13 @@ TICK_MOMENTUM_COUNT = 3      # Number of consecutive ticks in the same direction
 TICK_DURATION       = 5      # Rise/Fall contract duration in ticks
 TRADE_STAKE         = 1.00   # Fixed stake size ($1.00 minimum enforced by Deriv)
 
+# ─── Multiplier Settings (for Tick-Momentum) ──────────────────────────────────
+USE_MULTIPLIERS    = True        # Trade Multipliers (with SL/TP) instead of Rise/Fall
+MULTIPLIER_SL_USD  = 0.30        # Risk $0.30 per trade max
+MULTIPLIER_TP_USD  = 0.90        # Target $0.90 profit per trade (1:3 Risk-to-Reward)
+
 # ─── Targets & Safeguards ─────────────────────────────────────────────────────
-CIRCUIT_BREAKER_USD = 5.00   # Stop trading if balance falls below $5.00
+CIRCUIT_BREAKER_USD = 3.00   # Stop trading if balance falls below $3.00
 ACCOUNT_TARGET_USD  = 100.00 # Target balance to stop trading
 
 # ─── Trading Constraints ──────────────────────────────────────────────────────
@@ -58,6 +63,6 @@ RSI_SELL_THRESHOLD = 55
 ATR_MULTIPLIER = 1.5
 USE_AI_FILTER = False
 AI_VETO_THRESHOLD = 0.45
-SYMBOL_MULTIPLIERS = {"R_100": 40, "R_75": 50}
+SYMBOL_MULTIPLIERS = {"R_100": 400, "R_75": 50}
 MAGIC_COMMENT = "SMC_MICRO_BOT"
 
