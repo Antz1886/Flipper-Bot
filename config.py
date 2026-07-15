@@ -22,8 +22,8 @@ DERIV_REST_URL  = "https://api.derivws.com"
 DERIV_WS_URL    = f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID}"
 
 # ─── Symbol & Mode ────────────────────────────────────────────────────────────
-SYMBOLS         = ["R_100", "R_75"]  # Trade both Volatility 100 and Volatility 75
-DEMO_MODE       = False              # Set to True for virtual account testing
+SYMBOLS         = ["cryBTCUSD", "cryETHUSD"]  # Trade Bitcoin and Ethereum on Deriv
+DEMO_MODE       = True                        # Set to True for virtual account testing
 
 # ─── Tick-Momentum Parameters ────────────────────────────────────────────────
 TICK_MOMENTUM_COUNT = 3      # Number of consecutive ticks in the same direction
@@ -36,12 +36,12 @@ MULTIPLIER_SL_USD  = 0.30        # Risk $0.30 per trade max
 MULTIPLIER_TP_USD  = 0.90        # Target $0.90 profit per trade (1:3 Risk-to-Reward)
 
 # ─── Targets & Safeguards ─────────────────────────────────────────────────────
-CIRCUIT_BREAKER_USD = 1.00       # Stop trading if balance falls below $1.00 (cannot stake)
-ACCOUNT_TARGET_USD  = 100.00     # Target balance to stop trading
+CIRCUIT_BREAKER_USD = 1.00                               # Stop trading if balance falls below $1.00 (cannot stake)
+ACCOUNT_TARGET_USD  = 15000.00 if DEMO_MODE else 100.00  # Target balance to stop trading
 
 # ─── Daily Limits (for capital protection) ────────────────────────────────────
-DAILY_PROFIT_TARGET_USD = 3.00   # Stop trading for the day if profit reaches +$3.00
-DAILY_STOP_LOSS_USD     = 2.00   # Stop trading for the day if loss reaches -$2.00
+DAILY_PROFIT_TARGET_USD = 50.00  # Stop trading for the day if profit reaches +$50.00
+DAILY_STOP_LOSS_USD     = 30.00  # Stop trading for the day if loss reaches -$30.00
 
 # ─── Trading Constraints ──────────────────────────────────────────────────────
 MAX_CONCURRENT_TRADES = 1    # Limit to 1 open trade for the micro-account
