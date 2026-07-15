@@ -17,6 +17,25 @@ class BinanceFuturesClient:
             "X-MBX-APIKEY": self.api_key,
             "Content-Type": "application/x-www-form-urlencoded"
         }
+        self.time_offset = 0
+
+    async def sync_time(self):
+        """Synchronize time offset with Binance server to prevent timestamp errors."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.base_url}/fapi/v1/time"
+                start = int(time.time() * 1000)
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        server_time = int(data.get("serverTime", 0))
+                        end = int(time.time() * 1000)
+                        latency = (end - start) // 2
+                        local_time = end - latency
+                        self.time_offset = server_time - local_time
+                        log.info(f"⏰ Clock synchronized with Binance Futures. Offset: {self.time_offset}ms")
+        except Exception as e:
+            log.error(f"Failed to sync time with Binance: {e}")
 
     def _generate_signature(self, query_string: str) -> str:
         return hmac.new(
@@ -32,7 +51,7 @@ class BinanceFuturesClient:
         url = f"{self.base_url}{path}"
 
         if signed:
-            params["timestamp"] = int(time.time() * 1000)
+            params["timestamp"] = int(time.time() * 1000) + self.time_offset
             query_string = urllib.parse.urlencode(params)
             params["signature"] = self._generate_signature(query_string)
 

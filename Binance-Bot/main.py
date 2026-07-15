@@ -201,6 +201,8 @@ async def main():
         log.critical("❌ ERROR: API Credentials missing! Please configure BINANCE_API_KEY and BINANCE_API_SECRET in your .env file.")
         sys.exit(1)
 
+    await client.sync_time()
+
     log.info("Testing connectivity to Binance Futures...")
     if not await client.get_ping():
         log.critical("❌ Cannot connect to Binance Futures API. Check connection or endpoints.")
