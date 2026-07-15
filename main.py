@@ -72,123 +72,143 @@ def log_trade(symbol, side, entry_price, size, stop_loss, take_profit, result="O
         ])
 
 async def run_scan_cycle(client: BinanceFuturesClient):
-    symbol = config.SYMBOL
-    log.info(f"─── Starting Scan Cycle for {symbol} ───")
+    log.info("─── Starting Scan Cycle ───")
 
+    # 1. Fetch wallet balance once per cycle
     balance = await client.get_balance()
     log.info(f"Wallet Balance: {balance:.2f} USDT")
 
-    pos = await client.get_position_info(symbol)
-    pos_size = pos.get("size", 0.0)
-    entry_price = pos.get("entry_price", 0.0)
-    
-    if abs(pos_size) > 0.0:
-        log.info(f"📊 Active Position: {pos_size} BTC @ ${entry_price:.2f} | Unrealized PnL: ${pos.get('unrealized_pnl'):.2f}")
-        return True
+    if balance < config.CIRCUIT_BREAKER_USD:
+        log.warning(f"🛑 CIRCUIT BREAKER: Balance {balance:.2f} USDT is below minimum {config.CIRCUIT_BREAKER_USD} USDT. Stopping.")
+        return False
 
-    open_orders = await client.get_open_orders(symbol)
-    if open_orders:
-        log.info(f"🧹 Found {len(open_orders)} open orders without an active position. Cleaning up...")
-        await client.cancel_all_orders(symbol)
+    # 2. Iterate through configured symbols
+    for symbol, cfg in config.SYMBOLS_CONFIG.items():
+        log.info(f"Scanning {symbol}...")
+        qty_precision = cfg["qty_precision"]
 
-    h1_klines = await client.get_klines(symbol, "1h", limit=250)
-    if not h1_klines:
-        log.warning("Failed to fetch 1H candlesticks.")
-        return True
-    h1_closes = [float(k[4]) for k in h1_klines]
-    
-    m15_klines = await client.get_klines(symbol, "15m", limit=100)
-    if not m15_klines:
-        log.warning("Failed to fetch 15M candlesticks.")
-        return True
-    m15_closes = [float(k[4]) for k in m15_klines]
-    
-    current_price = m15_closes[-1]
-    
-    h1_trend_ema = calculate_ema(h1_closes, config.EMA_TREND_PERIOD)
-    m15_fast_ema = calculate_ema(m15_closes, config.EMA_FAST_PERIOD)
-    m15_slow_ema = calculate_ema(m15_closes, config.EMA_SLOW_PERIOD)
-    m15_rsi = calculate_rsi(m15_closes, config.RSI_PERIOD)
-    
-    log.info(f"Price: ${current_price:.2f} | H1 Trend EMA: ${h1_trend_ema:.2f}")
-    log.info(f"M15 Fast EMA: ${m15_fast_ema:.2f} | M15 Slow EMA: ${m15_slow_ema:.2f} | RSI: {m15_rsi:.2f}")
-
-    is_bullish_trend = current_price > h1_trend_ema
-    is_bearish_trend = current_price < h1_trend_ema
-
-    raw_qty = config.TRADE_STAKE_USDT / current_price
-    quantity = round(raw_qty, config.QTY_PRECISION)
-    if quantity == 0:
-        log.warning("Calculated quantity is 0. Increase TRADE_STAKE_USDT.")
-        return True
-
-    if is_bullish_trend:
-        ema_aligned = m15_fast_ema > m15_slow_ema
-        price_in_pullback = current_price <= m15_slow_ema
-        rsi_oversold = m15_rsi < config.RSI_BUY_THRESHOLD
+        # Fetch position status for this symbol
+        pos = await client.get_position_info(symbol)
+        pos_size = pos.get("size", 0.0)
+        entry_price = pos.get("entry_price", 0.0)
         
-        log.info(f"Long Scan: EMA aligned: {ema_aligned} | Pullback: {price_in_pullback} | RSI oversold: {rsi_oversold}")
+        if abs(pos_size) > 0.0:
+            log.info(f"📊 {symbol} Active Position: {pos_size} @ ${entry_price:.2f} | Unrealized PnL: ${pos.get('unrealized_pnl'):.2f}")
+            continue
+
+        # Clean open bracket orders if no position is active
+        open_orders = await client.get_open_orders(symbol)
+        if open_orders:
+            log.info(f"🧹 Found {len(open_orders)} open orders for {symbol} without position. Cleaning...")
+            await client.cancel_all_orders(symbol)
+
+        # Fetch Candlesticks
+        h1_klines = await client.get_klines(symbol, "1h", limit=250)
+        if not h1_klines:
+            log.warning(f"Failed to fetch 1H klines for {symbol}")
+            continue
+        h1_closes = [float(k[4]) for k in h1_klines]
         
-        if ema_aligned and price_in_pullback and rsi_oversold:
-            log.info("🚀 [LONG SIGNAL] Triggering buy order...")
-            buy_res = await client.place_order(symbol, "BUY", "MARKET", quantity)
-            if not buy_res or "orderId" not in buy_res:
-                log.error("Failed to execute market BUY order.")
-                return True
+        m15_klines = await client.get_klines(symbol, "15m", limit=100)
+        if not m15_klines:
+            log.warning(f"Failed to fetch 15M klines for {symbol}")
+            continue
+        m15_closes = [float(k[4]) for k in m15_klines]
+        
+        current_price = m15_closes[-1]
+        
+        # Calculate technical indicators
+        h1_trend_ema = calculate_ema(h1_closes, config.EMA_TREND_PERIOD)
+        m15_fast_ema = calculate_ema(m15_closes, config.EMA_FAST_PERIOD)
+        m15_slow_ema = calculate_ema(m15_closes, config.EMA_SLOW_PERIOD)
+        m15_rsi = calculate_rsi(m15_closes, config.RSI_PERIOD)
+        
+        log.info(f"  {symbol} Price: ${current_price:.2f} | H1 Trend EMA: ${h1_trend_ema:.2f}")
+        log.info(f"  M15 Fast EMA: ${m15_fast_ema:.2f} | M15 Slow EMA: ${m15_slow_ema:.2f} | RSI: {m15_rsi:.2f}")
+
+        is_bullish_trend = current_price > h1_trend_ema
+        is_bearish_trend = current_price < h1_trend_ema
+
+        # Calculate lot size
+        raw_qty = config.TRADE_STAKE_USDT / current_price
+        quantity = round(raw_qty, qty_precision)
+        if quantity == 0:
+            log.warning(f"Calculated quantity is 0 for {symbol}. Increase TRADE_STAKE_USDT.")
+            continue
+
+        # ─── LONG SETUP ──────────────────────────────────────────────────────
+        if is_bullish_trend:
+            ema_aligned = m15_fast_ema > m15_slow_ema
+            price_in_pullback = current_price <= m15_slow_ema
+            rsi_oversold = m15_rsi < config.RSI_BUY_THRESHOLD
+            
+            log.info(f"  Long Scan: EMA aligned: {ema_aligned} | Pullback: {price_in_pullback} | RSI oversold: {rsi_oversold}")
+            
+            if ema_aligned and price_in_pullback and rsi_oversold:
+                log.info(f"🚀 [{symbol} LONG SIGNAL] Triggering buy order...")
+                buy_res = await client.place_order(symbol, "BUY", "MARKET", quantity)
+                if not buy_res or "orderId" not in buy_res:
+                    log.error(f"Failed to execute market BUY for {symbol}.")
+                    continue
+                    
+                entry_spot = float(buy_res.get("avgPrice", current_price) or current_price)
+                log.info(f"✅ {symbol} Market BUY filled @ ${entry_spot:.2f} | Qty: {quantity}")
                 
-            entry_spot = float(buy_res.get("avgPrice", current_price) or current_price)
-            log.info(f"✅ Market BUY filled @ ${entry_spot:.2f} | Qty: {quantity}")
-            
-            sl_price = entry_spot * (1.0 - config.STOP_LOSS_PCT / 100.0)
-            sl_res = await client.place_order(symbol, "SELL", "STOP_MARKET", quantity, stop_price=sl_price, reduce_only=True)
-            
-            tp_price = entry_spot * (1.0 + config.TAKE_PROFIT_PCT / 100.0)
-            tp_res = await client.place_order(symbol, "SELL", "LIMIT", quantity, price=tp_price, reduce_only=True)
-            
-            if sl_res and tp_res:
-                log.info(f"✅ Bracket Orders Placed: SL @ ${sl_price:.2f} | TP @ ${tp_price:.2f}")
-                log_trade(symbol, "LONG", entry_spot, quantity, sl_price, tp_price)
-            else:
-                log.error("Failed to place bracket orders. Cleaning position.")
-                await client.place_order(symbol, "SELL", "MARKET", quantity, reduce_only=True)
+                # Stop Loss Order
+                sl_price = entry_spot * (1.0 - config.STOP_LOSS_PCT / 100.0)
+                sl_res = await client.place_order(symbol, "SELL", "STOP_MARKET", quantity, stop_price=sl_price, reduce_only=True)
+                
+                # Take Profit Order
+                tp_price = entry_spot * (1.0 + config.TAKE_PROFIT_PCT / 100.0)
+                tp_res = await client.place_order(symbol, "SELL", "LIMIT", quantity, price=tp_price, reduce_only=True)
+                
+                if sl_res and tp_res:
+                    log.info(f"✅ Bracket Orders Placed: SL @ ${sl_price:.2f} | TP @ ${tp_price:.2f}")
+                    log_trade(symbol, "LONG", entry_spot, quantity, sl_price, tp_price)
+                else:
+                    log.error("Failed to place bracket orders. Cleaning position.")
+                    await client.place_order(symbol, "SELL", "MARKET", quantity, reduce_only=True)
 
-    elif is_bearish_trend:
-        ema_aligned = m15_fast_ema < m15_slow_ema
-        price_in_pullback = current_price >= m15_slow_ema
-        rsi_overbought = m15_rsi > config.RSI_SELL_THRESHOLD
-        
-        log.info(f"Short Scan: EMA aligned: {ema_aligned} | Pullback: {price_in_pullback} | RSI overbought: {rsi_overbought}")
-        
-        if ema_aligned and price_in_pullback and rsi_overbought:
-            log.info("📉 [SHORT SIGNAL] Triggering sell order...")
-            sell_res = await client.place_order(symbol, "SELL", "MARKET", quantity)
-            if not sell_res or "orderId" not in sell_res:
-                log.error("Failed to execute market SELL order.")
-                return True
+        # ─── SHORT SETUP ─────────────────────────────────────────────────────
+        elif is_bearish_trend:
+            ema_aligned = m15_fast_ema < m15_slow_ema
+            price_in_pullback = current_price >= m15_slow_ema
+            rsi_overbought = m15_rsi > config.RSI_SELL_THRESHOLD
+            
+            log.info(f"  Short Scan: EMA aligned: {ema_aligned} | Pullback: {price_in_pullback} | RSI overbought: {rsi_overbought}")
+            
+            if ema_aligned and price_in_pullback and rsi_overbought:
+                log.info(f"📉 [{symbol} SHORT SIGNAL] Triggering sell order...")
+                sell_res = await client.place_order(symbol, "SELL", "MARKET", quantity)
+                if not sell_res or "orderId" not in sell_res:
+                    log.error(f"Failed to execute market SELL for {symbol}.")
+                    continue
+                    
+                entry_spot = float(sell_res.get("avgPrice", current_price) or current_price)
+                log.info(f"✅ {symbol} Market SELL filled @ ${entry_spot:.2f} | Qty: {quantity}")
                 
-            entry_spot = float(sell_res.get("avgPrice", current_price) or current_price)
-            log.info(f"✅ Market SELL filled @ ${entry_spot:.2f} | Qty: {quantity}")
-            
-            sl_price = entry_spot * (1.0 + config.STOP_LOSS_PCT / 100.0)
-            sl_res = await client.place_order(symbol, "BUY", "STOP_MARKET", quantity, stop_price=sl_price, reduce_only=True)
-            
-            tp_price = entry_spot * (1.0 - config.TAKE_PROFIT_PCT / 100.0)
-            tp_res = await client.place_order(symbol, "BUY", "LIMIT", quantity, price=tp_price, reduce_only=True)
-            
-            if sl_res and tp_res:
-                log.info(f"✅ Bracket Orders Placed: SL @ ${sl_price:.2f} | TP @ ${tp_price:.2f}")
-                log_trade(symbol, "SHORT", entry_spot, quantity, sl_price, tp_price)
-            else:
-                log.error("Failed to place bracket orders. Cleaning position.")
-                await client.place_order(symbol, "BUY", "MARKET", quantity, reduce_only=True)
+                # Stop Loss Order
+                sl_price = entry_spot * (1.0 + config.STOP_LOSS_PCT / 100.0)
+                sl_res = await client.place_order(symbol, "BUY", "STOP_MARKET", quantity, stop_price=sl_price, reduce_only=True)
                 
+                # Take Profit Order
+                tp_price = entry_spot * (1.0 - config.TAKE_PROFIT_PCT / 100.0)
+                tp_res = await client.place_order(symbol, "BUY", "LIMIT", quantity, price=tp_price, reduce_only=True)
+                
+                if sl_res and tp_res:
+                    log.info(f"✅ Bracket Orders Placed: SL @ ${sl_price:.2f} | TP @ ${tp_price:.2f}")
+                    log_trade(symbol, "SHORT", entry_spot, quantity, sl_price, tp_price)
+                else:
+                    log.error("Failed to place bracket orders. Cleaning position.")
+                    await client.place_order(symbol, "BUY", "MARKET", quantity, reduce_only=True)
+                    
     return True
 
 async def main():
     log.info("=" * 60)
     log.info("       BINANCE FUTURES TRADING BOT (TESTNET)")
     log.info("=" * 60)
-    log.info(f"  Symbol    : {config.SYMBOL}")
+    log.info(f"  Symbols   : {', '.join(config.SYMBOLS_CONFIG.keys())}")
     log.info(f"  Leverage  : {config.LEVERAGE}x")
     log.info(f"  Stake Size: {config.TRADE_STAKE_USDT} USDT")
     log.info(f"  SL / TP   : {config.STOP_LOSS_PCT}% / {config.TAKE_PROFIT_PCT}%")
@@ -209,8 +229,10 @@ async def main():
         sys.exit(1)
     log.info("✅ Connectivity test passed.")
 
+    # Leverage sync on startup for all configured symbols
     log.info(f"Synchronizing leverage settings on exchange...")
-    await client.set_leverage(config.SYMBOL, config.LEVERAGE)
+    for symbol in config.SYMBOLS_CONFIG.keys():
+        await client.set_leverage(symbol, config.LEVERAGE)
 
     if "--dry-run" in sys.argv:
         log.info("🧪 [DRY RUN] Verification completed successfully. Exiting.")

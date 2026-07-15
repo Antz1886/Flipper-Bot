@@ -15,10 +15,15 @@ PROD_URL    = "https://fapi.binance.com"
 BASE_URL    = TESTNET_URL if USE_TESTNET else PROD_URL
 
 # ─── Strategy Settings ────────────────────────────────────────────────────────
-SYMBOL             = "BTCUSDT"
-QTY_PRECISION      = 3         # 3 decimals for BTC/ETH, 2 for SOL
+# Configure the 3 coins that allow low $2.00 trades and have good trend profiles
+SYMBOLS_CONFIG = {
+    "ETHUSDT": {"qty_precision": 3},  # Ethereum (Min: ~$1.90)
+    "SOLUSDT": {"qty_precision": 2},  # Solana (Min: ~$1.40)
+    "ADAUSDT": {"qty_precision": 0}   # Cardano (Min: ~$0.60)
+}
+
 LEVERAGE           = 5         # 5x Leverage
-TRADE_STAKE_USDT   = 100.00    # Nominal trade size in USDT (Margin used will be STAKE / LEVERAGE = $20.00)
+TRADE_STAKE_USDT   = 2.00      # Nominal trade size of $2.00 (Margin used is STAKE / LEVERAGE = $0.40 per coin)
 
 # Risk Management
 STOP_LOSS_PCT      = 1.5       # Stop Loss at 1.5% price distance
@@ -37,3 +42,4 @@ EMA_TREND_PERIOD   = 200       # Trend filter on H1 chart
 SCAN_INTERVAL_S    = 15        # Scan market every 15 seconds
 LOG_FILE           = "logs/bot.log"
 TRADE_LOG_CSV      = "logs/trades.csv"
+CIRCUIT_BREAKER_USD = 1.00     # Stop trading if balance falls below $1.00
