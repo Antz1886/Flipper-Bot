@@ -1,0 +1,38 @@
+import os
+from dotenv import load_dotenv
+
+# Load credentials from .env file
+load_dotenv()
+
+# ─── API Configuration ────────────────────────────────────────────────────────
+BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+USE_TESTNET        = True  # Always True for Testnet demo trading
+
+# Endpoints
+TESTNET_URL = "https://testnet.binancefuture.com"
+PROD_URL    = "https://fapi.binance.com"
+BASE_URL    = TESTNET_URL if USE_TESTNET else PROD_URL
+
+# ─── Strategy Settings ────────────────────────────────────────────────────────
+SYMBOL             = "BTCUSDT"
+LEVERAGE           = 5         # 5x Leverage
+TRADE_STAKE_USDT   = 10.00     # Nominal trade size in USDT (Margin used will be STAKE / LEVERAGE = $2.00)
+
+# Risk Management
+STOP_LOSS_PCT      = 1.5       # Stop Loss at 1.5% price distance
+TAKE_PROFIT_PCT     = 3.0       # Take Profit at 3.0% price distance (1:2 Risk-to-Reward)
+
+# Indicators
+RSI_PERIOD         = 14
+RSI_BUY_THRESHOLD  = 35        # Buy the dip when RSI < 35 on M15 chart
+RSI_SELL_THRESHOLD = 65        # Sell the bounce when RSI > 65 on M15 chart
+
+EMA_FAST_PERIOD    = 20
+EMA_SLOW_PERIOD    = 50
+EMA_TREND_PERIOD   = 200       # Trend filter on H1 chart
+
+# ─── Execution Settings ──────────────────────────────────────────────────────
+SCAN_INTERVAL_S    = 15        # Scan market every 15 seconds
+LOG_FILE           = "logs/binance_bot.log"
+TRADE_LOG_CSV      = "logs/trades.csv"
