@@ -153,7 +153,7 @@ class BinanceFuturesClient:
             "symbol": symbol.upper(),
             "side": side.upper(),
             "type": order_type.upper(),
-            "quantity": round(quantity, 3)
+            "quantity": round(quantity, config.QTY_PRECISION)
         }
 
         if price is not None:

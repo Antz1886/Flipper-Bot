@@ -16,6 +16,7 @@ BASE_URL    = TESTNET_URL if USE_TESTNET else PROD_URL
 
 # ─── Strategy Settings ────────────────────────────────────────────────────────
 SYMBOL             = "BTCUSDT"
+QTY_PRECISION      = 3         # 3 decimals for BTC/ETH, 2 for SOL
 LEVERAGE           = 5         # 5x Leverage
 TRADE_STAKE_USDT   = 100.00    # Nominal trade size in USDT (Margin used will be STAKE / LEVERAGE = $20.00)
 

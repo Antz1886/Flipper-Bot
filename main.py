@@ -117,7 +117,7 @@ async def run_scan_cycle(client: BinanceFuturesClient):
     is_bearish_trend = current_price < h1_trend_ema
 
     raw_qty = config.TRADE_STAKE_USDT / current_price
-    quantity = round(raw_qty, 3)
+    quantity = round(raw_qty, config.QTY_PRECISION)
     if quantity == 0:
         log.warning("Calculated quantity is 0. Increase TRADE_STAKE_USDT.")
         return True
