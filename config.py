@@ -27,13 +27,13 @@ DEMO_MODE       = True                        # Set to True for virtual account 
 
 # ─── Tick-Momentum Parameters ────────────────────────────────────────────────
 TICK_MOMENTUM_COUNT = 3      # Number of consecutive ticks in the same direction
-TICK_DURATION       = 5      # Rise/Fall contract duration in ticks
-TRADE_STAKE         = 1.00   # Fixed stake size ($1.00 minimum enforced by Deriv)
+TICK_DURATION       = 5      # Rise/Fall contract duration in ticks (unused when multipliers are active)
+TRADE_STAKE         = 10.00  # Stake size for Demo account ($2.00 minimum for crypto multipliers)
 
 # ─── Multiplier Settings (for Tick-Momentum) ──────────────────────────────────
-USE_MULTIPLIERS    = False       # Set to False to trade Rise/Fall contracts (zero commission)
-MULTIPLIER_SL_USD  = 0.30        # Risk $0.30 per trade max
-MULTIPLIER_TP_USD  = 0.90        # Target $0.90 profit per trade (1:3 Risk-to-Reward)
+USE_MULTIPLIERS    = True        # Set to True because Deriv only offers Multipliers for Crypto
+MULTIPLIER_SL_USD  = 5.00        # Risk $5.00 per trade max (50% of stake)
+MULTIPLIER_TP_USD  = 15.00       # Target $15.00 profit per trade (150% of stake)
 
 # ─── Targets & Safeguards ─────────────────────────────────────────────────────
 CIRCUIT_BREAKER_USD = 1.00                               # Stop trading if balance falls below $1.00 (cannot stake)
@@ -67,6 +67,6 @@ RSI_SELL_THRESHOLD = 55
 ATR_MULTIPLIER = 1.5
 USE_AI_FILTER = False
 AI_VETO_THRESHOLD = 0.45
-SYMBOL_MULTIPLIERS = {"R_100": 400, "R_75": 50}
+SYMBOL_MULTIPLIERS = {"cryBTCUSD": 500, "cryETHUSD": 500}
 MAGIC_COMMENT = "SMC_MICRO_BOT"
 

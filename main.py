@@ -408,10 +408,19 @@ async def main():
             with open(PID_FILE, 'r') as f:
                 old_pid = int(f.read().strip())
             if old_pid != os.getpid():
-                os.kill(old_pid, 0)
-                print(f"❌ ERROR: Bot is already running (PID {old_pid}). Exiting.")
-                sys.exit(1)
-        except (OSError, ValueError):
+                if sys.platform == "win32":
+                    import ctypes
+                    exists = ctypes.windll.kernel32.GetProcessVersion(old_pid) > 0
+                    if exists:
+                        print(f"❌ ERROR: Bot is already running (PID {old_pid}). Exiting.")
+                        sys.exit(1)
+                    else:
+                        raise OSError("Process not running")
+                else:
+                    os.kill(old_pid, 0)
+                    print(f"❌ ERROR: Bot is already running (PID {old_pid}). Exiting.")
+                    sys.exit(1)
+        except (OSError, ValueError, SystemError):
             try:
                 os.remove(PID_FILE)
             except OSError:
