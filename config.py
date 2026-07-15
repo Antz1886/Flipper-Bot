@@ -17,7 +17,7 @@ BASE_URL    = TESTNET_URL if USE_TESTNET else PROD_URL
 # ─── Strategy Settings ────────────────────────────────────────────────────────
 SYMBOL             = "BTCUSDT"
 LEVERAGE           = 5         # 5x Leverage
-TRADE_STAKE_USDT   = 10.00     # Nominal trade size in USDT (Margin used will be STAKE / LEVERAGE = $2.00)
+TRADE_STAKE_USDT   = 100.00    # Nominal trade size in USDT (Margin used will be STAKE / LEVERAGE = $20.00)
 
 # Risk Management
 STOP_LOSS_PCT      = 1.5       # Stop Loss at 1.5% price distance
