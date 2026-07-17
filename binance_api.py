@@ -149,11 +149,16 @@ class BinanceFuturesClient:
 
     async def place_order(self, symbol: str, side: str, order_type: str, quantity: float, price: float = None, stop_price: float = None, reduce_only: bool = False) -> dict:
         """Place an order (Market, Limit, Stop Market)."""
+        precision = config.SYMBOLS_CONFIG.get(symbol.upper(), {}).get("qty_precision", 3)
+        rounded_qty = round(quantity, precision)
+        if precision == 0:
+            rounded_qty = int(rounded_qty)
+
         params = {
             "symbol": symbol.upper(),
             "side": side.upper(),
             "type": order_type.upper(),
-            "quantity": round(quantity, config.QTY_PRECISION)
+            "quantity": rounded_qty
         }
 
         if price is not None:

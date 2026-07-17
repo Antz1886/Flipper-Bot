@@ -139,7 +139,7 @@ async def run_scan_cycle(client: BinanceFuturesClient):
         # ─── LONG SETUP ──────────────────────────────────────────────────────
         if is_bullish_trend:
             ema_aligned = m15_fast_ema > m15_slow_ema
-            price_in_pullback = current_price <= m15_slow_ema
+            price_in_pullback = current_price <= m15_fast_ema
             rsi_oversold = m15_rsi < config.RSI_BUY_THRESHOLD
             
             log.info(f"  Long Scan: EMA aligned: {ema_aligned} | Pullback: {price_in_pullback} | RSI oversold: {rsi_oversold}")
@@ -172,7 +172,7 @@ async def run_scan_cycle(client: BinanceFuturesClient):
         # ─── SHORT SETUP ─────────────────────────────────────────────────────
         elif is_bearish_trend:
             ema_aligned = m15_fast_ema < m15_slow_ema
-            price_in_pullback = current_price >= m15_slow_ema
+            price_in_pullback = current_price >= m15_fast_ema
             rsi_overbought = m15_rsi > config.RSI_SELL_THRESHOLD
             
             log.info(f"  Short Scan: EMA aligned: {ema_aligned} | Pullback: {price_in_pullback} | RSI overbought: {rsi_overbought}")
