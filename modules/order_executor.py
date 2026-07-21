@@ -30,6 +30,10 @@ async def place_multiplier_contract(
         log.error("Order execution failed: Deriv API is not connected.")
         return None
 
+    if not api.authorized:
+        log.warning(f"⚠️ [{symbol} {direction} SIGNAL DETECTED] Order execution requires a valid DERIV_API_TOKEN in .env. Skipping execution.")
+        return None
+
     contract_type = "MULTUP" if direction.upper() == "LONG" else "MULTDOWN"
     multiplier = config.SYMBOL_MULTIPLIERS.get(symbol, 100)
 

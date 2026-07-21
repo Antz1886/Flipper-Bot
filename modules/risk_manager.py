@@ -21,6 +21,10 @@ async def check_account_health() -> bool:
         return False
 
     balance = api.balance
+    if not api.authorized:
+        log.warning("⚠️ DERIV_API_TOKEN is missing in .env. Bot is running in READ-ONLY Market Scanner Mode.")
+        return True
+
     log.info(f"Deriv Wallet Balance: {api.currency} {balance:.2f}")
 
     if balance < config.CIRCUIT_BREAKER_USD:
