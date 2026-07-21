@@ -1,3 +1,9 @@
+"""
+main.py — Flipper-Bot Main Orchestrator (Deriv Forex, Gold, and Oil Edition)
+Connects to Deriv API WebSocket, scans Forex, Gold, and Oil candles,
+and executes Deriv Multiplier contracts with embedded SL/TP boundaries.
+"""
+
 import asyncio
 import os
 import sys
@@ -6,11 +12,16 @@ import time
 import csv
 from datetime import datetime
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import config
-from binance_api import BinanceFuturesClient
+from modules import connector
+from modules.data_feed import fetch_ohlc
+from modules.order_executor import place_multiplier_contract
+from modules.risk_manager import check_account_health
 
-# Setup logging
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+# Configure Logging
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
@@ -21,233 +32,147 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger("main")
-sys.stdout.reconfigure(encoding="utf-8")
 
-def calculate_ema(prices: list, period: int) -> float:
-    if len(prices) < period:
-        return 0.0
-    k = 2 / (period + 1)
-    ema = sum(prices[:period]) / period
-    for price in prices[period:]:
-        ema = price * k + ema * (1 - k)
-    return ema
 
-def calculate_rsi(prices: list, period: int = 14) -> float:
-    if len(prices) < period + 1:
-        return 50.0
-    gains = []
-    losses = []
-    for i in range(1, len(prices)):
-        diff = prices[i] - prices[i-1]
-        if diff > 0:
-            gains.append(diff)
-            losses.append(0.0)
-        else:
-            gains.append(0.0)
-            losses.append(abs(diff))
-    
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    
-    if avg_loss == 0:
-        return 100.0
-        
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-        
-    rs = avg_gain / max(1e-10, avg_loss)
-    return 100.0 - (100.0 / (1.0 + rs))
+def calculate_ema(series, period):
+    """Calculate Exponential Moving Average."""
+    return series.ewm(span=period, adjust=False).mean()
 
-def log_trade(symbol, side, entry_price, size, stop_loss, take_profit, result="OPEN", pnl=0.0):
-    os.makedirs("logs", exist_ok=True)
-    file_exists = os.path.exists(config.TRADE_LOG_CSV)
-    with open(config.TRADE_LOG_CSV, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["timestamp", "symbol", "side", "entry_price", "size", "stop_loss", "take_profit", "result", "pnl"])
-        writer.writerow([
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            symbol, side, entry_price, size, stop_loss, take_profit, result, pnl
-        ])
 
-async def run_scan_cycle(client: BinanceFuturesClient):
-    log.info("─── Starting Scan Cycle ───")
+def calculate_rsi(series, period=14):
+    """Calculate Relative Strength Index."""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
-    # 1. Fetch wallet balance once per cycle
-    balance = await client.get_balance()
-    log.info(f"Wallet Balance: {balance:.2f} USDT")
 
-    if balance < config.CIRCUIT_BREAKER_USD:
-        log.warning(f"🛑 CIRCUIT BREAKER: Balance {balance:.2f} USDT is below minimum {config.CIRCUIT_BREAKER_USD} USDT. Stopping.")
-        return False
+def log_trade(symbol, side, entry_price, stake, stop_loss_usd, take_profit_usd, contract_id="N/A"):
+    """Log executed trade details to CSV journal."""
+    try:
+        os.makedirs("logs", exist_ok=True)
+        file_exists = os.path.exists(config.TRADE_LOG_CSV)
+        with open(config.TRADE_LOG_CSV, mode="a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["timestamp", "symbol", "side", "entry_price", "stake", "stop_loss_usd", "take_profit_usd", "contract_id"])
+            writer.writerow([
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                symbol, side, entry_price, stake, stop_loss_usd, take_profit_usd, contract_id
+            ])
+    except Exception as e:
+        log.error(f"Failed to log trade to CSV: {e}")
 
-    # 2. Iterate through configured symbols
-    for symbol, cfg in config.SYMBOLS_CONFIG.items():
-        log.info(f"Scanning {symbol}...")
-        qty_precision = cfg["qty_precision"]
-
-        # Fetch position status for this symbol
-        pos = await client.get_position_info(symbol)
-        pos_size = pos.get("size", 0.0)
-        entry_price = pos.get("entry_price", 0.0)
-        
-        if abs(pos_size) > 0.0:
-            log.info(f"📊 {symbol} Active Position: {pos_size} @ ${entry_price:.2f} | Unrealized PnL: ${pos.get('unrealized_pnl'):.2f}")
-            continue
-
-        # Clean open bracket orders if no position is active
-        open_orders = await client.get_open_orders(symbol)
-        if open_orders:
-            log.info(f"🧹 Found {len(open_orders)} open orders for {symbol} without position. Cleaning...")
-            await client.cancel_all_orders(symbol)
-
-        # Fetch Candlesticks
-        h1_klines = await client.get_klines(symbol, "1h", limit=250)
-        if not h1_klines:
-            log.warning(f"Failed to fetch 1H klines for {symbol}")
-            continue
-        h1_closes = [float(k[4]) for k in h1_klines]
-        
-        m15_klines = await client.get_klines(symbol, "15m", limit=100)
-        if not m15_klines:
-            log.warning(f"Failed to fetch 15M klines for {symbol}")
-            continue
-        m15_closes = [float(k[4]) for k in m15_klines]
-        
-        current_price = m15_closes[-1]
-        
-        # Calculate technical indicators
-        h1_trend_ema = calculate_ema(h1_closes, config.EMA_TREND_PERIOD)
-        m15_fast_ema = calculate_ema(m15_closes, config.EMA_FAST_PERIOD)
-        m15_slow_ema = calculate_ema(m15_closes, config.EMA_SLOW_PERIOD)
-        m15_rsi = calculate_rsi(m15_closes, config.RSI_PERIOD)
-        
-        log.info(f"  {symbol} Price: ${current_price:.2f} | H1 Trend EMA: ${h1_trend_ema:.2f}")
-        log.info(f"  M15 Fast EMA: ${m15_fast_ema:.2f} | M15 Slow EMA: ${m15_slow_ema:.2f} | RSI: {m15_rsi:.2f}")
-
-        is_bullish_trend = current_price > h1_trend_ema
-        is_bearish_trend = current_price < h1_trend_ema
-
-        # Calculate lot size
-        raw_qty = config.TRADE_STAKE_USDT / current_price
-        quantity = round(raw_qty, qty_precision)
-        if quantity == 0:
-            log.warning(f"Calculated quantity is 0 for {symbol}. Increase TRADE_STAKE_USDT.")
-            continue
-
-        # ─── LONG SETUP ──────────────────────────────────────────────────────
-        if is_bullish_trend:
-            ema_aligned = m15_fast_ema > m15_slow_ema
-            price_in_pullback = current_price <= m15_fast_ema
-            rsi_oversold = m15_rsi < config.RSI_BUY_THRESHOLD
-            
-            log.info(f"  Long Scan: EMA aligned: {ema_aligned} | Pullback: {price_in_pullback} | RSI oversold: {rsi_oversold}")
-            
-            if ema_aligned and price_in_pullback and rsi_oversold:
-                log.info(f"🚀 [{symbol} LONG SIGNAL] Triggering buy order...")
-                buy_res = await client.place_order(symbol, "BUY", "MARKET", quantity)
-                if not buy_res or "orderId" not in buy_res:
-                    log.error(f"Failed to execute market BUY for {symbol}.")
-                    continue
-                    
-                entry_spot = float(buy_res.get("avgPrice", current_price) or current_price)
-                log.info(f"✅ {symbol} Market BUY filled @ ${entry_spot:.2f} | Qty: {quantity}")
-                
-                # Stop Loss Order
-                sl_price = entry_spot * (1.0 - config.STOP_LOSS_PCT / 100.0)
-                sl_res = await client.place_order(symbol, "SELL", "STOP_MARKET", quantity, stop_price=sl_price, reduce_only=True)
-                
-                # Take Profit Order
-                tp_price = entry_spot * (1.0 + config.TAKE_PROFIT_PCT / 100.0)
-                tp_res = await client.place_order(symbol, "SELL", "LIMIT", quantity, price=tp_price, reduce_only=True)
-                
-                if sl_res and tp_res:
-                    log.info(f"✅ Bracket Orders Placed: SL @ ${sl_price:.2f} | TP @ ${tp_price:.2f}")
-                    log_trade(symbol, "LONG", entry_spot, quantity, sl_price, tp_price)
-                else:
-                    log.error("Failed to place bracket orders. Cleaning position.")
-                    await client.place_order(symbol, "SELL", "MARKET", quantity, reduce_only=True)
-
-        # ─── SHORT SETUP ─────────────────────────────────────────────────────
-        elif is_bearish_trend:
-            ema_aligned = m15_fast_ema < m15_slow_ema
-            price_in_pullback = current_price >= m15_fast_ema
-            rsi_overbought = m15_rsi > config.RSI_SELL_THRESHOLD
-            
-            log.info(f"  Short Scan: EMA aligned: {ema_aligned} | Pullback: {price_in_pullback} | RSI overbought: {rsi_overbought}")
-            
-            if ema_aligned and price_in_pullback and rsi_overbought:
-                log.info(f"📉 [{symbol} SHORT SIGNAL] Triggering sell order...")
-                sell_res = await client.place_order(symbol, "SELL", "MARKET", quantity)
-                if not sell_res or "orderId" not in sell_res:
-                    log.error(f"Failed to execute market SELL for {symbol}.")
-                    continue
-                    
-                entry_spot = float(sell_res.get("avgPrice", current_price) or current_price)
-                log.info(f"✅ {symbol} Market SELL filled @ ${entry_spot:.2f} | Qty: {quantity}")
-                
-                # Stop Loss Order
-                sl_price = entry_spot * (1.0 + config.STOP_LOSS_PCT / 100.0)
-                sl_res = await client.place_order(symbol, "BUY", "STOP_MARKET", quantity, stop_price=sl_price, reduce_only=True)
-                
-                # Take Profit Order
-                tp_price = entry_spot * (1.0 - config.TAKE_PROFIT_PCT / 100.0)
-                tp_res = await client.place_order(symbol, "BUY", "LIMIT", quantity, price=tp_price, reduce_only=True)
-                
-                if sl_res and tp_res:
-                    log.info(f"✅ Bracket Orders Placed: SL @ ${sl_price:.2f} | TP @ ${tp_price:.2f}")
-                    log_trade(symbol, "SHORT", entry_spot, quantity, sl_price, tp_price)
-                else:
-                    log.error("Failed to place bracket orders. Cleaning position.")
-                    await client.place_order(symbol, "BUY", "MARKET", quantity, reduce_only=True)
-                    
-    return True
 
 async def main():
     log.info("=" * 60)
-    log.info("       BINANCE FUTURES TRADING BOT (TESTNET)")
+    log.info("       FLIPPER-BOT (DERIV FOREX, GOLD & OIL EDITION)")
     log.info("=" * 60)
-    log.info(f"  Symbols   : {', '.join(config.SYMBOLS_CONFIG.keys())}")
-    log.info(f"  Leverage  : {config.LEVERAGE}x")
-    log.info(f"  Stake Size: {config.TRADE_STAKE_USDT} USDT")
-    log.info(f"  SL / TP   : {config.STOP_LOSS_PCT}% / {config.TAKE_PROFIT_PCT}%")
-    log.info(f"  Testnet   : {config.USE_TESTNET}")
+    log.info(f"   Symbols     : {', '.join(config.SYMBOLS)}")
+    log.info(f"   Contract    : Deriv Multipliers (MULTUP / MULTDOWN)")
+    log.info(f"   Stake Size  : ${config.TRADE_STAKE:.2f} USD")
+    log.info(f"   SL / TP     : ${config.MULTIPLIER_SL_USD:.2f} / ${config.MULTIPLIER_TP_USD:.2f} USD")
+    log.info(f"   Demo Mode   : {config.DEMO_MODE}")
     log.info("=" * 60)
 
-    client = BinanceFuturesClient()
+    # 1. Connect and Authorize with Deriv WebSocket API
+    success = await connector.initialize()
+    if not success:
+        log.critical("Failed to initialize Deriv API connection. Exiting.")
+        return
 
-    if not client.api_key or not client.api_secret:
-        log.critical("❌ ERROR: API Credentials missing! Please configure BINANCE_API_KEY and BINANCE_API_SECRET in your .env file.")
-        sys.exit(1)
+    api = connector.get_api()
 
-    await client.sync_time()
-
-    log.info("Testing connectivity to Binance Futures...")
-    if not await client.get_ping():
-        log.critical("❌ Cannot connect to Binance Futures API. Check connection or endpoints.")
-        sys.exit(1)
-    log.info("✅ Connectivity test passed.")
-
-    # Leverage sync on startup for all configured symbols
-    log.info(f"Synchronizing leverage settings on exchange...")
-    for symbol in config.SYMBOLS_CONFIG.keys():
-        await client.set_leverage(symbol, config.LEVERAGE)
-
+    # Dry Run check flag
     if "--dry-run" in sys.argv:
         log.info("🧪 [DRY RUN] Verification completed successfully. Exiting.")
+        await connector.shutdown()
         return
 
     log.info("🚀 Starting main scanning loop...")
-    while True:
-        try:
-            should_continue = await run_scan_cycle(client)
-            if not should_continue:
-                break
-        except Exception as e:
-            log.error(f"Error in scan cycle: {e}", exc_info=True)
-            
-        await asyncio.sleep(config.SCAN_INTERVAL_S)
+
+    try:
+        while True:
+            log.info("─── Starting Scan Cycle ───")
+
+            # Check account balance & circuit breaker
+            healthy = await check_account_health()
+            if not healthy:
+                log.warning("Account health check failed or circuit breaker hit. Pausing...")
+                await asyncio.sleep(config.SCAN_INTERVAL_S)
+                continue
+
+            for symbol in config.SYMBOLS:
+                log.info(f"Scanning {symbol}...")
+
+                # Fetch 1-Hour candles for Macro Trend Filter (200 EMA)
+                df_h1 = await fetch_ohlc(symbol, granularity=3600, n_bars=210)
+                if df_h1 is None or len(df_h1) < config.EMA_TREND_PERIOD:
+                    log.warning(f"  Insufficient H1 candle data for {symbol} — skipping.")
+                    continue
+
+                df_h1["ema_trend"] = calculate_ema(df_h1["close"], config.EMA_TREND_PERIOD)
+                h1_trend_ema = df_h1["ema_trend"].iloc[-1]
+                current_price = df_h1["close"].iloc[-1]
+
+                # Fetch 15-Minute candles for Entry Signals (20/50 EMA + RSI)
+                df_m15 = await fetch_ohlc(symbol, granularity=900, n_bars=100)
+                if df_m15 is None or len(df_m15) < config.EMA_SLOW_PERIOD:
+                    log.warning(f"  Insufficient M15 candle data for {symbol} — skipping.")
+                    continue
+
+                df_m15["ema_fast"] = calculate_ema(df_m15["close"], config.EMA_FAST_PERIOD)
+                df_m15["ema_slow"] = calculate_ema(df_m15["close"], config.EMA_SLOW_PERIOD)
+                df_m15["rsi"] = calculate_rsi(df_m15["close"], config.RSI_PERIOD)
+
+                m15_fast_ema = df_m15["ema_fast"].iloc[-1]
+                m15_slow_ema = df_m15["ema_slow"].iloc[-1]
+                m15_rsi = df_m15["rsi"].iloc[-1]
+
+                is_bullish_trend = current_price > h1_trend_ema
+                is_bearish_trend = current_price < h1_trend_ema
+
+                log.info(f"  {symbol} Price: ${current_price:.4f} | H1 Trend EMA: ${h1_trend_ema:.4f}")
+                log.info(f"  M15 Fast EMA: ${m15_fast_ema:.4f} | M15 Slow EMA: ${m15_slow_ema:.4f} | RSI: {m15_rsi:.2f}")
+
+                # ─── LONG SETUP ──────────────────────────────────────────────────────
+                if is_bullish_trend:
+                    ema_aligned = m15_fast_ema > m15_slow_ema
+                    price_in_pullback = current_price <= m15_fast_ema
+                    rsi_oversold = m15_rsi < config.RSI_BUY_THRESHOLD
+
+                    log.info(f"  Long Scan: EMA aligned: {ema_aligned} | Pullback: {price_in_pullback} | RSI oversold: {rsi_oversold}")
+
+                    if ema_aligned and price_in_pullback and rsi_oversold:
+                        log.info(f"🚀 [{symbol} LONG SIGNAL] Triggering Deriv MULTUP contract...")
+                        res = await place_multiplier_contract(symbol, "LONG")
+                        if res:
+                            log_trade(symbol, "LONG", current_price, config.TRADE_STAKE, config.MULTIPLIER_SL_USD, config.MULTIPLIER_TP_USD, res.get("contract_id"))
+
+                # ─── SHORT SETUP ─────────────────────────────────────────────────────
+                elif is_bearish_trend:
+                    ema_aligned = m15_fast_ema < m15_slow_ema
+                    price_in_pullback = current_price >= m15_fast_ema
+                    rsi_overbought = m15_rsi > config.RSI_SELL_THRESHOLD
+
+                    log.info(f"  Short Scan: EMA aligned: {ema_aligned} | Pullback: {price_in_pullback} | RSI overbought: {rsi_overbought}")
+
+                    if ema_aligned and price_in_pullback and rsi_overbought:
+                        log.info(f"🚀 [{symbol} SHORT SIGNAL] Triggering Deriv MULTDOWN contract...")
+                        res = await place_multiplier_contract(symbol, "SHORT")
+                        if res:
+                            log_trade(symbol, "SHORT", current_price, config.TRADE_STAKE, config.MULTIPLIER_SL_USD, config.MULTIPLIER_TP_USD, res.get("contract_id"))
+
+            await asyncio.sleep(config.SCAN_INTERVAL_S)
+
+    except KeyboardInterrupt:
+        log.info("Shutdown requested by user.")
+    except Exception as e:
+        log.error(f"Unexpected error in main loop: {e}", exc_info=True)
+    finally:
+        await connector.shutdown()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

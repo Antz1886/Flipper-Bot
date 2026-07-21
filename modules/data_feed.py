@@ -1,14 +1,11 @@
 """
 modules/data_feed.py — Deriv OHLC Data Fetcher
-Fetches candlestick history via the Deriv ticks_history API and
-returns a pandas DataFrame compatible with smartmoneyconcepts.
+Fetches candlestick history via the Deriv ticks_history API and returns pandas DataFrames.
 """
 
 import logging
 import pandas as pd
-
 from modules.connector import get_api
-from config import N_BARS
 
 log = logging.getLogger(__name__)
 
@@ -16,24 +13,26 @@ log = logging.getLogger(__name__)
 async def fetch_ohlc(
     symbol: str,
     granularity: int,
-    n_bars: int = N_BARS,
+    n_bars: int = 200,
 ) -> pd.DataFrame | None:
     """
-    Fetch the last `n_bars` OHLC candles via Deriv ticks_history.
+    Fetch the last `n_bars` OHLC candles via Deriv ticks_history API.
 
     Parameters
     ----------
-    symbol      : Deriv symbol code, e.g. "R_75"
-    granularity : Candle size in seconds (300 = M5, 900 = M15)
+    symbol      : Deriv symbol code, e.g. "frxEURUSD", "frxXAUUSD", "frxXTIUSD"
+    granularity : Candle size in seconds (900 = M15, 3600 = H1)
     n_bars      : Number of candles to fetch
 
     Returns
     -------
     DataFrame with columns: time, open, high, low, close, volume
-    Compatible with the smartmoneyconcepts library.
-    None on failure.
     """
     api = get_api()
+    if not api or not api.is_active:
+        log.error("Cannot fetch OHLC: Deriv API is not connected.")
+        return None
+
     try:
         resp = await api.send({
             "ticks_history": symbol,
@@ -61,8 +60,6 @@ async def fetch_ohlc(
     for col in ("open", "high", "low", "close"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Deriv candle history doesn't include tick volume — use row index as proxy
-    # (smc.ob() uses volume to rank OB strength; non-zero values avoid div-by-zero)
     if "volume" not in df.columns:
         df["volume"] = range(1, len(df) + 1)
 
