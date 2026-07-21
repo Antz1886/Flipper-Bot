@@ -18,9 +18,10 @@ DERIV_WS_URL    = f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID}"
 # Deriv symbols:
 # frxEURUSD: EUR/USD Forex
 # frxGBPUSD: GBP/USD Forex
-# frxXAUUSD: Gold / USD Commodity
-# frxXTIUSD: WTI Crude Oil / USD Commodity
-SYMBOLS     = ["frxEURUSD", "frxGBPUSD", "frxXAUUSD", "frxXTIUSD"]
+# frxUSDJPY: USD/JPY Forex
+# frxAUDUSD: AUD/USD Forex
+# frxUSDCAD: USD/CAD Forex
+SYMBOLS     = ["frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD", "frxUSDCAD"]
 DEMO_MODE   = True   # Set to True for virtual account testing
 
 # ─── Strategy Indicator Parameters ──────────────────────────────────────────

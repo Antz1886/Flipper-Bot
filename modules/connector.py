@@ -33,7 +33,8 @@ class DerivAPI:
         self._transaction_handlers: list[Callable] = []
         self._recv_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
-        self.balance: float = 0.0
+        self._balance_event: asyncio.Event | None = None
+        self.balance: float | None = None
         self.currency: str = "USD"
         self.loginid: str = ""
         self.authorized: bool = False
@@ -53,6 +54,10 @@ class DerivAPI:
             except (asyncio.CancelledError, Exception):
                 pass
             self._heartbeat_task = None
+
+        if self._balance_event and not self._balance_event.is_set():
+            self._balance_event.set()
+        self._balance_event = None
 
         if self._recv_task:
             self._recv_task.cancel()
@@ -108,8 +113,10 @@ class DerivAPI:
 
                 elif msg_type == "balance":
                     bal = msg.get("balance", {})
-                    self.balance  = float(bal.get("balance", self.balance))
+                    self.balance  = float(bal.get("balance", self.balance if self.balance is not None else 0.0))
                     self.currency = bal.get("currency", self.currency)
+                    if self._balance_event and not self._balance_event.is_set():
+                        self._balance_event.set()
                     log.debug(f"Balance update: {self.currency} {self.balance:.2f}")
 
                 elif msg_type == "transaction":
@@ -169,14 +176,27 @@ class DerivAPI:
                     log.info("Authorizing with Deriv API Token...")
                     auth_resp = await self.send({"authorize": api_token})
                     auth_data = auth_resp.get("authorize", {})
-                    self.balance = float(auth_data.get("balance", 0.0))
-                    self.currency = auth_data.get("currency", "USD")
-                    self.loginid = auth_data.get("loginid", "")
                     self.authorized = True
-                    log.info(f"✅ Authorized | Account: {self.loginid} | Balance: {self.currency} {self.balance:.2f}")
+                    self.loginid = auth_data.get("loginid", "")
+                    self.currency = auth_data.get("currency", "USD")
+                    self.balance = None
+                    if auth_data.get("balance") is not None:
+                        self.balance = float(auth_data.get("balance", 0.0))
+                    log.info(
+                        f"✅ Authorized | Account: {self.loginid} | Balance: "
+                        f"{self.currency} {self.balance if self.balance is not None else 'N/A'}"
+                    )
 
-                    # Subscribe to balance updates
+                    self._balance_event = asyncio.Event()
                     await self.send({"balance": 1, "subscribe": 1})
+                    try:
+                        await asyncio.wait_for(self._balance_event.wait(), timeout=10.0)
+                        log.debug("Received initial balance update from Deriv.")
+                    except asyncio.TimeoutError:
+                        log.warning("Balance subscription did not return an update within 10s; using cached balance if available.")
+
+                    if self.balance is None:
+                        self.balance = 0.0
 
                 else:
                     log.warning("No DERIV_API_TOKEN set. Running in unauthenticated mode (read-only feeds).")
