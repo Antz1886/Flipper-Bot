@@ -155,13 +155,17 @@ class DerivAPI:
 
     async def connect(self) -> bool:
         """Connect to Deriv WebSocket and authorize with API Token. Returns True on success."""
-        ws_url = config.DERIV_WS_URL
+        ws_urls = [
+            config.DERIV_WS_URL,
+            f"wss://ws.binaryws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
+        ]
         api_token = config.DERIV_API_TOKEN
 
         for attempt in range(1, MAX_RETRIES + 1):
             await self._cleanup()
+            ws_url = ws_urls[(attempt - 1) % len(ws_urls)]
             try:
-                log.info(f"Connecting to Deriv WebSocket... (attempt {attempt}/{MAX_RETRIES})")
+                log.info(f"Connecting to Deriv WebSocket ({ws_url})... (attempt {attempt}/{MAX_RETRIES})")
                 self._ws = await websockets.connect(
                     ws_url,
                     ping_interval=None,

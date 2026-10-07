@@ -1,27 +1,35 @@
 """
-main.py — Flipper-Bot Main Orchestrator (Deriv Forex, Gold, and Oil Edition)
-Connects to Deriv API WebSocket, scans Forex, Gold, and Oil candles,
-and executes Deriv Multiplier contracts with embedded SL/TP boundaries.
+main.py — Conti Institutional SMC Trading Framework (Deriv Multipliers)
+Orchestrates:
+  1. Data Ingestion: Clean M15 OHLC candle feeds via Deriv WebSocket API.
+  2. Single Structural Edge: Liquidity Sweep -> MSS -> Order Block Mitigation.
+  3. Hardcoded Risk Mandates: Fixed 2% risk sizing + 5% daily circuit breaker.
+  4. Execution: Automated Deriv MULTUP / MULTDOWN routing with zero manual intervention.
 """
 
 import asyncio
 import os
 import sys
 import logging
-import time
 import csv
 from datetime import datetime
 
 import config
 from modules import connector
 from modules.data_feed import fetch_ohlc
+from modules.smc_engine import detect_institutional_setup
+from modules.risk_manager import (
+    check_account_health,
+    calculate_order_risk,
+    can_open_symbol,
+    mark_symbol_active,
+    mark_symbol_closed,
+)
 from modules.order_executor import place_multiplier_contract
-from modules.risk_manager import check_account_health
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-# Configure Logging
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
@@ -34,47 +42,38 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 
-def calculate_ema(series, period):
-    """Calculate Exponential Moving Average."""
-    return series.ewm(span=period, adjust=False).mean()
-
-
-def calculate_rsi(series, period=14):
-    """Calculate Relative Strength Index."""
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-
-def log_trade(symbol, side, entry_price, stake, stop_loss_usd, take_profit_usd, contract_id="N/A"):
-    """Log executed trade details to CSV journal."""
+def log_trade(symbol, side, entry_price, stake, stop_loss_usd, take_profit_usd, contract_id="N/A", sweep_level=0.0):
+    """Log executed trade details into the standardized trade journal."""
     try:
         os.makedirs("logs", exist_ok=True)
         file_exists = os.path.exists(config.TRADE_LOG_CSV)
         with open(config.TRADE_LOG_CSV, mode="a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(["timestamp", "symbol", "side", "entry_price", "stake", "stop_loss_usd", "take_profit_usd", "contract_id"])
+                writer.writerow([
+                    "timestamp", "symbol", "side", "entry_price", "stake",
+                    "stop_loss_usd", "take_profit_usd", "contract_id", "sweep_level"
+                ])
             writer.writerow([
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                symbol, side, entry_price, stake, stop_loss_usd, take_profit_usd, contract_id
+                symbol, side, entry_price, stake,
+                stop_loss_usd, take_profit_usd, contract_id, sweep_level
             ])
     except Exception as e:
         log.error(f"Failed to log trade to CSV: {e}")
 
 
 async def main():
-    log.info("=" * 60)
-    log.info("       FLIPPER-BOT (DERIV FOREX, GOLD & OIL EDITION)")
-    log.info("=" * 60)
-    log.info(f"   Symbols     : {', '.join(config.SYMBOLS)}")
-    log.info(f"   Contract    : Deriv Multipliers (MULTUP / MULTDOWN)")
-    log.info(f"   Stake Size  : ${config.TRADE_STAKE:.2f} USD")
-    log.info(f"   SL / TP     : ${config.MULTIPLIER_SL_USD:.2f} / ${config.MULTIPLIER_TP_USD:.2f} USD")
-    log.info(f"   Demo Mode   : {config.DEMO_MODE}")
-    log.info("=" * 60)
+    log.info("=" * 65)
+    log.info("      CONTI INSTITUTIONAL SMC AUTOMATED TRADING BOT (DERIV)")
+    log.info("=" * 65)
+    log.info(f"   Symbols       : {', '.join(config.SYMBOLS)}")
+    log.info(f"   Core Edge     : Liquidity Sweep + Order Block Mitigation (M15)")
+    log.info(f"   Risk Mandate  : Fixed {config.RISK_PER_TRADE_PCT*100:.1f}% equity risk per trade")
+    log.info(f"   Hard Circuit  : {config.MAX_DAILY_DRAWDOWN_PCT*100:.1f}% max daily loss halt")
+    log.info(f"   Target R:R    : 1:{config.RISK_REWARD_RATIO:.1f} minimum projected reward")
+    log.info(f"   Demo Testing  : {config.DEMO_MODE}")
+    log.info("=" * 65)
 
     # 1. Connect and Authorize with Deriv WebSocket API
     success = await connector.initialize()
@@ -84,85 +83,81 @@ async def main():
 
     api = connector.get_api()
 
-    # Dry Run check flag
+    # Dry Run verification check
     if "--dry-run" in sys.argv:
-        log.info("🧪 [DRY RUN] Verification completed successfully. Exiting.")
+        log.info("🧪 [DRY RUN] Architecture and connectivity verified. Exiting.")
         await connector.shutdown()
         return
 
-    log.info("🚀 Starting main scanning loop...")
+    log.info("🚀 Starting institutional scanning and execution loop...")
 
     try:
         while True:
-            log.info("─── Starting Scan Cycle ───")
+            log.info("─── Starting Institutional Scan Cycle ───")
 
-            # Check account balance & circuit breaker
-            healthy = await check_account_health()
+            # 1. Check account balance & daily circuit breaker
+            healthy = check_account_health()
             if not healthy:
-                log.warning("Account health check failed or circuit breaker hit. Pausing...")
+                log.warning("Daily circuit breaker active or balance floor breached. Pausing cycle...")
                 await asyncio.sleep(config.SCAN_INTERVAL_S)
                 continue
 
+            current_balance = api.balance if (api and api.balance is not None) else 1000.0
+
             for symbol in config.SYMBOLS:
-                log.info(f"Scanning {symbol}...")
-
-                # Fetch 1-Hour candles for Macro Trend Filter (200 EMA)
-                df_h1 = await fetch_ohlc(symbol, granularity=3600, n_bars=210)
-                if df_h1 is None or len(df_h1) < config.EMA_TREND_PERIOD:
-                    log.warning(f"  Insufficient H1 candle data for {symbol} — skipping.")
+                # 2. Check position locks
+                if not can_open_symbol(symbol):
+                    log.debug(f"  {symbol} already has an active position open — skipping scan.")
                     continue
 
-                df_h1["ema_trend"] = calculate_ema(df_h1["close"], config.EMA_TREND_PERIOD)
-                h1_trend_ema = df_h1["ema_trend"].iloc[-1]
-                current_price = df_h1["close"].iloc[-1]
+                log.info(f"Evaluating {symbol}...")
 
-                # Fetch 15-Minute candles for Entry Signals (20/50 EMA + RSI)
-                df_m15 = await fetch_ohlc(symbol, granularity=900, n_bars=100)
-                if df_m15 is None or len(df_m15) < config.EMA_SLOW_PERIOD:
-                    log.warning(f"  Insufficient M15 candle data for {symbol} — skipping.")
+                # 3. Data Ingestion: Fetch M15 OHLC candles
+                df_m15 = await fetch_ohlc(symbol, granularity=config.PRIMARY_TIMEFRAME_S, n_bars=config.N_BARS_INGEST)
+                if df_m15 is None or len(df_m15) < 30:
+                    log.warning(f"  Insufficient candle data for {symbol} — skipping.")
                     continue
 
-                df_m15["ema_fast"] = calculate_ema(df_m15["close"], config.EMA_FAST_PERIOD)
-                df_m15["ema_slow"] = calculate_ema(df_m15["close"], config.EMA_SLOW_PERIOD)
-                df_m15["rsi"] = calculate_rsi(df_m15["close"], config.RSI_PERIOD)
+                # 4. Signal Generation: Single structural SMC edge
+                signal = detect_institutional_setup(symbol, df_m15)
 
-                m15_fast_ema = df_m15["ema_fast"].iloc[-1]
-                m15_slow_ema = df_m15["ema_slow"].iloc[-1]
-                m15_rsi = df_m15["rsi"].iloc[-1]
+                if signal:
+                    # 5. Hardcoded Risk Calculation
+                    stake_usd, sl_usd, tp_usd = calculate_order_risk(
+                        signal.entry_price, signal.stop_loss, current_balance
+                    )
 
-                is_bullish_trend = current_price > h1_trend_ema
-                is_bearish_trend = current_price < h1_trend_ema
+                    log.info(
+                        f"⚡ [{signal.direction} SIGNAL CONFIRMED] {symbol} | "
+                        f"Entry: ${signal.entry_price:.5f} | SL: ${signal.stop_loss:.5f} | TP: ${signal.take_profit:.5f} | "
+                        f"Equity Risk: ${sl_usd:.2f} ({(sl_usd/current_balance)*100:.1f}%) | "
+                        f"Target Profit: ${tp_usd:.2f}"
+                    )
 
-                log.info(f"  {symbol} Price: ${current_price:.4f} | H1 Trend EMA: ${h1_trend_ema:.4f}")
-                log.info(f"  M15 Fast EMA: ${m15_fast_ema:.4f} | M15 Slow EMA: ${m15_slow_ema:.4f} | RSI: {m15_rsi:.2f}")
+                    # 6. Execute Deriv Multiplier order
+                    mark_symbol_active(symbol)
+                    order_res = await place_multiplier_contract(
+                        symbol=symbol,
+                        direction=signal.direction,
+                        stake=stake_usd,
+                        stop_loss_usd=sl_usd,
+                        take_profit_usd=tp_usd,
+                    )
 
-                # ─── LONG SETUP ──────────────────────────────────────────────────────
-                if is_bullish_trend:
-                    ema_aligned = m15_fast_ema > m15_slow_ema
-                    price_in_pullback = current_price <= m15_fast_ema
-                    rsi_oversold = m15_rsi < config.RSI_BUY_THRESHOLD
-
-                    log.info(f"  Long Scan: EMA aligned: {ema_aligned} | Pullback: {price_in_pullback} | RSI oversold: {rsi_oversold}")
-
-                    if ema_aligned and price_in_pullback and rsi_oversold:
-                        log.info(f"🚀 [{symbol} LONG SIGNAL] Triggering Deriv MULTUP contract...")
-                        res = await place_multiplier_contract(symbol, "LONG")
-                        if res:
-                            log_trade(symbol, "LONG", current_price, config.TRADE_STAKE, config.MULTIPLIER_SL_USD, config.MULTIPLIER_TP_USD, res.get("contract_id"))
-
-                # ─── SHORT SETUP ─────────────────────────────────────────────────────
-                elif is_bearish_trend:
-                    ema_aligned = m15_fast_ema < m15_slow_ema
-                    price_in_pullback = current_price >= m15_fast_ema
-                    rsi_overbought = m15_rsi > config.RSI_SELL_THRESHOLD
-
-                    log.info(f"  Short Scan: EMA aligned: {ema_aligned} | Pullback: {price_in_pullback} | RSI overbought: {rsi_overbought}")
-
-                    if ema_aligned and price_in_pullback and rsi_overbought:
-                        log.info(f"🚀 [{symbol} SHORT SIGNAL] Triggering Deriv MULTDOWN contract...")
-                        res = await place_multiplier_contract(symbol, "SHORT")
-                        if res:
-                            log_trade(symbol, "SHORT", current_price, config.TRADE_STAKE, config.MULTIPLIER_SL_USD, config.MULTIPLIER_TP_USD, res.get("contract_id"))
+                    if order_res:
+                        log_trade(
+                            symbol=symbol,
+                            side=signal.direction,
+                            entry_price=signal.entry_price,
+                            stake=stake_usd,
+                            stop_loss_usd=sl_usd,
+                            take_profit_usd=tp_usd,
+                            contract_id=order_res.get("contract_id", "N/A"),
+                            sweep_level=signal.sweep_level,
+                        )
+                else:
+                    last_price = float(df_m15["close"].iloc[-1])
+                    log.info(f"  {symbol}: ${last_price:.5f} — No unmitigated liquidity sweep setup.")
 
             await asyncio.sleep(config.SCAN_INTERVAL_S)
 

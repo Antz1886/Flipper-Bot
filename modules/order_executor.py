@@ -17,13 +17,13 @@ _exec_lock = asyncio.Lock()
 async def place_multiplier_contract(
     symbol: str,
     direction: str,  # "LONG" or "SHORT"
-    stake: float = config.TRADE_STAKE,
-    stop_loss_usd: float = config.MULTIPLIER_SL_USD,
-    take_profit_usd: float = config.MULTIPLIER_TP_USD,
+    stake: float,
+    stop_loss_usd: float,
+    take_profit_usd: float,
 ) -> dict | None:
     """
     Buy a Deriv Multiplier contract (MULTUP for LONG, MULTDOWN for SHORT)
-    with embedded stop_loss and take_profit.
+    with embedded stop_loss and take_profit based on institutional sizing.
     """
     api = get_api()
     if not api or not api.is_active:
@@ -31,7 +31,10 @@ async def place_multiplier_contract(
         return None
 
     if not api.authorized:
-        log.warning(f"⚠️ [{symbol} {direction} SIGNAL DETECTED] Order execution requires a valid DERIV_API_TOKEN in .env. Skipping execution.")
+        log.warning(
+            f"⚠️ [{symbol} {direction} SIGNAL DETECTED] Order execution requires a valid DERIV_API_TOKEN in .env. "
+            f"Stake: ${stake:.2f} | SL: ${stop_loss_usd:.2f} | TP: ${take_profit_usd:.2f}. Skipping execution."
+        )
         return None
 
     contract_type = "MULTUP" if direction.upper() == "LONG" else "MULTDOWN"
@@ -51,8 +54,8 @@ async def place_multiplier_contract(
 
     async with _exec_lock:
         log.info(
-            f"→ Requesting Multiplier Proposal | {contract_type} ({multiplier}x) | {symbol} | "
-            f"Stake: ${stake:.2f} | SL: ${stop_loss_usd:.2f} | TP: ${take_profit_usd:.2f}"
+            f"→ Routing Institutional Order | {contract_type} ({multiplier}x) | {symbol} | "
+            f"Stake: ${stake:.2f} | Stop Loss: ${stop_loss_usd:.2f} | Take Profit: ${take_profit_usd:.2f}"
         )
 
         for attempt in range(1, config.MAX_RETRIES + 1):
@@ -89,8 +92,8 @@ async def place_multiplier_contract(
                 purchase_price = buy_info.get("buy_price", ask_price)
 
                 log.info(
-                    f"✅ Deriv Multiplier {contract_type} Purchased! | {symbol} | "
-                    f"Contract ID: {contract_id} | Price: ${purchase_price:.2f}"
+                    f"✅ Institutional {contract_type} Executed! | {symbol} | "
+                    f"Contract ID: {contract_id} | Purchase: ${purchase_price:.2f}"
                 )
 
                 return {
