@@ -1,13 +1,15 @@
 """
 modules/order_executor.py — Deriv Multiplier Contract Executor
 Places MULTUP (bullish) or MULTDOWN (bearish) multiplier contracts
-with dollar-amount stop_loss and take_profit embedded in the initial buy request.
+with dollar-amount stop_loss and take_profit mathematically calibrated
+to the SMC structural stop-loss price.
 """
 
 import logging
 import asyncio
 import config
 from modules.connector import get_api
+from modules.risk_manager import can_open_symbol, mark_symbol_active
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +25,8 @@ async def place_multiplier_contract(
 ) -> dict | None:
     """
     Buy a Deriv Multiplier contract (MULTUP for LONG, MULTDOWN for SHORT)
-    with embedded stop_loss and take_profit based on institutional sizing.
+    with embedded stop_loss and take_profit based on structural sizing.
+    Engages the symbol lock ONLY after confirmed exchange purchase.
     """
     api = get_api()
     if not api or not api.is_active:
@@ -48,14 +51,22 @@ async def place_multiplier_contract(
         "currency": api.currency or "USD",
         "multiplier": multiplier,
         "underlying_symbol": symbol,
+        "limit_order": {
+            "stop_loss": stop_loss_usd,
+            "take_profit": take_profit_usd,
+        },
         "stop_loss": stop_loss_usd,
-        "take_profit": take_profit_usd
+        "take_profit": take_profit_usd,
     }
 
     async with _exec_lock:
+        if not can_open_symbol(symbol):
+            log.info(f"⏭️ Skipping {symbol}: position limit or symbol lock already active.")
+            return None
+
         log.info(
             f"→ Routing Institutional Order | {contract_type} ({multiplier}x) | {symbol} | "
-            f"Stake: ${stake:.2f} | Stop Loss: ${stop_loss_usd:.2f} | Take Profit: ${take_profit_usd:.2f}"
+            f"Stake: ${stake:.2f} | Structural SL: ${stop_loss_usd:.2f} | Structural TP: ${take_profit_usd:.2f}"
         )
 
         for attempt in range(1, config.MAX_RETRIES + 1):
@@ -89,11 +100,15 @@ async def place_multiplier_contract(
 
                 buy_info = buy_resp.get("buy", {})
                 contract_id = buy_info.get("contract_id")
-                purchase_price = buy_info.get("buy_price", ask_price)
+                purchase_price = float(buy_info.get("buy_price", ask_price or stake))
+
+                # Engage lock ONLY after confirmed fill
+                mark_symbol_active(symbol, stake_usd=purchase_price)
 
                 log.info(
                     f"✅ Institutional {contract_type} Executed! | {symbol} | "
-                    f"Contract ID: {contract_id} | Purchase: ${purchase_price:.2f}"
+                    f"Contract ID: {contract_id} | Stake Locked: ${purchase_price:.2f} | "
+                    f"SL: ${stop_loss_usd:.2f} | TP: ${take_profit_usd:.2f}"
                 )
 
                 return {
@@ -104,7 +119,7 @@ async def place_multiplier_contract(
                     "stake": stake,
                     "multiplier": multiplier,
                     "stop_loss": stop_loss_usd,
-                    "take_profit": take_profit_usd
+                    "take_profit": take_profit_usd,
                 }
 
             except Exception as e:
