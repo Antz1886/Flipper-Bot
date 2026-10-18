@@ -158,6 +158,7 @@ class DerivAPI:
         ws_urls = [
             config.DERIV_WS_URL,
             f"wss://ws.binaryws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
+            f"wss://green.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
         ]
         api_token = config.DERIV_API_TOKEN
 
@@ -168,6 +169,7 @@ class DerivAPI:
                 log.info(f"Connecting to Deriv WebSocket ({ws_url})... (attempt {attempt}/{MAX_RETRIES})")
                 self._ws = await websockets.connect(
                     ws_url,
+                    origin="https://app.deriv.com",
                     ping_interval=None,
                     ping_timeout=None,
                     close_timeout=10,
@@ -178,28 +180,36 @@ class DerivAPI:
 
                 if api_token and api_token != "your_api_token_here":
                     log.info("Authorizing with Deriv API Token...")
-                    auth_resp = await self.send({"authorize": api_token})
-                    auth_data = auth_resp.get("authorize", {})
-                    self.authorized = True
-                    self.loginid = auth_data.get("loginid", "")
-                    self.currency = auth_data.get("currency", "USD")
-                    self.balance = None
-                    if auth_data.get("balance") is not None:
-                        self.balance = float(auth_data.get("balance", 0.0))
-                    log.info(
-                        f"✅ Authorized | Account: {self.loginid} | Balance: "
-                        f"{self.currency} {self.balance if self.balance is not None else 'N/A'}"
-                    )
-
-                    self._balance_event = asyncio.Event()
-                    await self.send({"balance": 1, "subscribe": 1})
                     try:
-                        await asyncio.wait_for(self._balance_event.wait(), timeout=10.0)
-                        log.debug("Received initial balance update from Deriv.")
-                    except asyncio.TimeoutError:
-                        log.warning("Balance subscription did not return an update within 10s; using cached balance if available.")
+                        auth_resp = await self.send({"authorize": api_token})
+                        auth_data = auth_resp.get("authorize", {})
+                        self.authorized = True
+                        self.loginid = auth_data.get("loginid", "")
+                        self.currency = auth_data.get("currency", "USD")
+                        self.balance = None
+                        if auth_data.get("balance") is not None:
+                            self.balance = float(auth_data.get("balance", 0.0))
+                        log.info(
+                            f"✅ Authorized | Account: {self.loginid} | Balance: "
+                            f"{self.currency} {self.balance if self.balance is not None else 'N/A'}"
+                        )
 
-                    if self.balance is None:
+                        self._balance_event = asyncio.Event()
+                        await self.send({"balance": 1, "subscribe": 1})
+                        try:
+                            await asyncio.wait_for(self._balance_event.wait(), timeout=10.0)
+                            log.debug("Received initial balance update from Deriv.")
+                        except asyncio.TimeoutError:
+                            log.warning("Balance subscription did not return an update within 10s; using cached balance if available.")
+
+                        if self.balance is None:
+                            self.balance = 0.0
+                    except RuntimeError as auth_err:
+                        log.error(
+                            f"⚠️ API Token rejected by Deriv WebSocket ({auth_err}). "
+                            "Falling back to unauthenticated Read-Only Market Scanner Mode so container stays alive."
+                        )
+                        self.authorized = False
                         self.balance = 0.0
 
                 else:
