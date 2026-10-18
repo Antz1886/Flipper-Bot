@@ -156,9 +156,10 @@ class DerivAPI:
     async def connect(self) -> bool:
         """Connect to Deriv WebSocket and authorize with API Token. Returns True on success."""
         ws_urls = [
+            f"wss://red.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
             config.DERIV_WS_URL,
+            f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
             f"wss://ws.binaryws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
-            f"wss://green.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
         ]
         api_token = config.DERIV_API_TOKEN
 

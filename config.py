@@ -14,7 +14,7 @@ load_dotenv()
 DERIV_APP_ID    = os.getenv("DERIV_APP_ID", "1089")
 DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "")
 
-DERIV_WS_URL    = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
+DERIV_WS_URL    = os.getenv("DERIV_WS_URL", f"wss://red.derivws.com/websockets/v3?app_id={DERIV_APP_ID}")
 
 # ─── Symbol Selection & Account Mode ─────────────────────────────────────────
 # Liquid Forex Pairs on Deriv
