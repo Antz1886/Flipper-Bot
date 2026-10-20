@@ -174,7 +174,7 @@ def calculate_order_risk(
     """
     multiplier = float(config.SYMBOL_MULTIPLIERS.get(symbol, 100))
     target_risk_usd = balance * config.RISK_PER_TRADE_PCT
-    max_risk_cap = max(config.MAX_STAKE_USD, balance * 0.05)
+    max_risk_cap = min(config.MAX_STAKE_USD, balance * 0.05)
     risk_usd = max(config.MIN_STAKE_USD, min(target_risk_usd, max_risk_cap))
 
     if entry_price > 0 and stop_loss > 0 and entry_price != stop_loss:
@@ -184,7 +184,7 @@ def calculate_order_risk(
         if leverage_factor > 0:
             # Exact stake required so that hitting `stop_loss` price loses `risk_usd`
             raw_stake = risk_usd / leverage_factor
-            max_margin_usd = max(config.MAX_STAKE_USD, balance * config.MAX_MARGIN_PER_TRADE_PCT)
+            max_margin_usd = max(config.MIN_STAKE_USD, min(config.MAX_STAKE_USD, balance * config.MAX_MARGIN_PER_TRADE_PCT))
             stake_usd = round(max(config.MIN_STAKE_USD, min(raw_stake, max_margin_usd)), 2)
 
             # Dollar stop loss corresponding to the structural stop price on `stake_usd`
