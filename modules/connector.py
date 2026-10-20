@@ -1,6 +1,6 @@
 """
 modules/connector.py — Deriv WebSocket API Connection Manager
-Maintains a persistent WebSocket connection to Deriv API.
+Maintains a persistent WebSocket connection to Deriv API with automatic reconnection.
 Routes responses via req_id-keyed Futures and dispatches tick/balance updates.
 """
 
@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 
 
 class DerivAPI:
-    """Persistent Deriv WebSocket connection with async request/response routing."""
+    """Persistent Deriv WebSocket connection with async request/response routing and auto-reconnect."""
 
     def __init__(self):
         self._ws = None
@@ -144,22 +144,33 @@ class DerivAPI:
                 await asyncio.sleep(25.0)
                 healthy = await self.is_connected()
                 if not healthy:
-                    log.warning("Heartbeat health check failed! WebSocket connection is dead.")
+                    log.warning("Heartbeat health check failed! Marking connection inactive for auto-reconnect.")
+                    self.is_active = False
+                    self.connection_healthy = False
                     if self._ws:
-                        await self._ws.close()
+                        try:
+                            await self._ws.close()
+                        except Exception:
+                            pass
                     break
         except asyncio.CancelledError:
             pass
         except Exception as e:
             log.error(f"Error in heartbeat loop: {e}")
 
+    async def ensure_connected(self) -> bool:
+        """Ensure the WebSocket connection is active, automatically reconnecting if dropped."""
+        if self.is_active and self._ws and self._ws.state == State.OPEN:
+            return True
+        log.info("🔄 Deriv WebSocket disconnected — initiating automatic reconnection...")
+        return await self.connect()
+
     async def connect(self) -> bool:
         """Connect to Deriv WebSocket and authorize with API Token. Returns True on success."""
         ws_urls = [
             f"wss://red.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
-            config.DERIV_WS_URL,
+            f"wss://red.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
             f"wss://ws.derivws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
-            f"wss://ws.binaryws.com/websockets/v3?app_id={config.DERIV_APP_ID}",
         ]
         api_token = config.DERIV_API_TOKEN
 
@@ -255,8 +266,8 @@ class DerivAPI:
         fut = asyncio.get_event_loop().create_future()
         self._pending[rid] = fut
         try:
-            await asyncio.wait_for(self._ws.send(json.dumps({"ping": 1, "req_id": rid})), timeout=3.0)
-            await asyncio.wait_for(fut, timeout=3.0)
+            await asyncio.wait_for(self._ws.send(json.dumps({"ping": 1, "req_id": rid})), timeout=10.0)
+            await asyncio.wait_for(fut, timeout=10.0)
             self.connection_healthy = True
             return True
         except Exception:
@@ -279,6 +290,13 @@ async def initialize() -> bool:
     global _api
     _api = DerivAPI()
     return await _api.connect()
+
+
+async def ensure_connected() -> bool:
+    global _api
+    if _api is None:
+        _api = DerivAPI()
+    return await _api.ensure_connected()
 
 
 def get_api() -> DerivAPI:

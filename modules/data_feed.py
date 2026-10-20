@@ -5,6 +5,7 @@ Fetches candlestick history via the Deriv ticks_history API and returns pandas D
 
 import logging
 import pandas as pd
+from modules import connector
 from modules.connector import get_api
 
 log = logging.getLogger(__name__)
@@ -30,8 +31,11 @@ async def fetch_ohlc(
     """
     api = get_api()
     if not api or not api.is_active:
-        log.error("Cannot fetch OHLC: Deriv API is not connected.")
-        return None
+        reconnected = await connector.ensure_connected()
+        api = get_api()
+        if not reconnected or not api or not api.is_active:
+            log.error("Cannot fetch OHLC: Deriv API is not connected.")
+            return None
 
     try:
         resp = await api.send({

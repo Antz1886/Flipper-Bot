@@ -1,11 +1,12 @@
 """
 main.py — Conti Institutional SMC Trading Framework (Quant Edition)
 Orchestrates:
-  1. Live Portfolio Sync: Queries Deriv `portfolio` every cycle to track active stakes & unlock closed pairs.
-  2. Hardcoded Risk Mandates: Equity-based 5% daily drawdown circuit breaker + max 2 concurrent USD trades.
-  3. Data Ingestion: Clean M15 OHLC candle feeds via Deriv WebSocket API.
-  4. Quantitative SMC Engine: Closed-bar Swing Liquidity Sweep -> ATR Displacement -> Unmitigated OB Entry.
-  5. True Structural Sizing: Stake and dollar SL/TP mathematically bound to |entry - stop_loss| and multiplier.
+  1. Auto-Reconnecting WebSocket Session: Automatically restores dropped connections every cycle.
+  2. Live Portfolio Sync: Queries Deriv `portfolio` every cycle to track active stakes & unlock closed pairs.
+  3. Hardcoded Risk Mandates: Equity-based 5% daily drawdown circuit breaker + max 2 concurrent USD trades.
+  4. Data Ingestion: Clean M15 OHLC candle feeds via Deriv WebSocket API.
+  5. Quantitative SMC Engine: Closed-bar Swing Liquidity Sweep -> ATR Displacement -> Unmitigated OB Entry.
+  6. True Structural Sizing: Stake and dollar SL/TP mathematically bound to |entry - stop_loss| and multiplier.
 """
 
 import asyncio
@@ -80,10 +81,7 @@ async def main():
     # 1. Connect and Authorize with Deriv WebSocket API
     success = await connector.initialize()
     if not success:
-        log.critical("Failed to initialize Deriv API connection. Exiting.")
-        return
-
-    api = connector.get_api()
+        log.warning("Initial Deriv connection failed; scan loop will automatically retry every cycle.")
 
     # Dry Run verification check
     if "--dry-run" in sys.argv:
@@ -96,6 +94,14 @@ async def main():
     try:
         while True:
             log.info("─── Starting Institutional Scan Cycle ───")
+
+            # 0. Ensure WebSocket connection is active (auto-reconnect if dropped)
+            if not await connector.ensure_connected():
+                log.warning("Deriv WebSocket unavailable after reconnect attempts. Retrying next cycle...")
+                await asyncio.sleep(config.SCAN_INTERVAL_S)
+                continue
+
+            api = connector.get_api()
 
             # 1. Sync active contracts & stakes with Deriv exchange before evaluating health
             await sync_open_positions()
