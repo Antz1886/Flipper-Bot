@@ -43,6 +43,10 @@ async def place_multiplier_contract(
     contract_type = "MULTUP" if direction.upper() == "LONG" else "MULTDOWN"
     multiplier = config.SYMBOL_MULTIPLIERS.get(symbol, 100)
 
+    # Deriv OTP WebSocket (/trading/v1/options/ws/...) uses "underlying_symbol",
+    # whereas Deriv v3 WebSocket (/websockets/v3) uses "symbol".
+    symbol_key = "underlying_symbol" if getattr(api, "using_otp_ws", False) else "symbol"
+
     proposal_payload = {
         "proposal": 1,
         "amount": stake,
@@ -50,13 +54,11 @@ async def place_multiplier_contract(
         "contract_type": contract_type,
         "currency": api.currency or "USD",
         "multiplier": multiplier,
-        "underlying_symbol": symbol,
+        symbol_key: symbol,
         "limit_order": {
             "stop_loss": stop_loss_usd,
             "take_profit": take_profit_usd,
         },
-        "stop_loss": stop_loss_usd,
-        "take_profit": take_profit_usd,
     }
 
     async with _exec_lock:
@@ -118,14 +120,14 @@ async def place_multiplier_contract(
                     "purchase_price": purchase_price,
                     "stake": stake,
                     "multiplier": multiplier,
-                    "stop_loss": stop_loss_usd,
-                    "take_profit": take_profit_usd,
+                    "stop_loss_usd": stop_loss_usd,
+                    "take_profit_usd": take_profit_usd,
                 }
 
             except Exception as e:
-                log.error(f"Exception executing multiplier order for {symbol}: {e}")
+                log.warning(f"Order execution attempt {attempt}/{config.MAX_RETRIES} error for {symbol}: {e}")
                 if attempt < config.MAX_RETRIES:
                     await asyncio.sleep(config.RETRY_DELAY_S)
 
-        log.error(f"Failed to place multiplier contract for {symbol} after {config.MAX_RETRIES} attempts.")
-        return None
+    log.error(f"❌ Failed to execute {direction} multiplier order for {symbol} after {config.MAX_RETRIES} attempts.")
+    return None

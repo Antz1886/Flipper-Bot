@@ -11,10 +11,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ─── Deriv API Credentials ───────────────────────────────────────────────────
-DERIV_APP_ID    = os.getenv("DERIV_APP_ID", "1089")
-DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "")
+# Flipper-Bot Registered Deriv Application ID (21-char NanoID for REST+OTP API)
+DERIV_APP_ID        = os.getenv("DERIV_APP_ID", "33z3Jc7fSBXsnKQzT1tXm")
+# Public v3 WebSocket App ID for unauthenticated/legacy v3 feeds
+DERIV_PUBLIC_APP_ID = os.getenv("DERIV_PUBLIC_APP_ID", "1089")
+DERIV_API_TOKEN     = os.getenv("DERIV_API_TOKEN", "").strip()
 
-DERIV_WS_URL    = os.getenv("DERIV_WS_URL", f"wss://red.derivws.com/websockets/v3?app_id={DERIV_APP_ID}")
+DERIV_REST_URL      = os.getenv("DERIV_REST_URL", "https://api.derivws.com")
+DERIV_WS_URL        = os.getenv(
+    "DERIV_WS_URL",
+    f"wss://red.derivws.com/websockets/v3?app_id={DERIV_PUBLIC_APP_ID}",
+)
 
 # ─── Symbol Selection & Account Mode ─────────────────────────────────────────
 # Liquid Forex Pairs on Deriv
