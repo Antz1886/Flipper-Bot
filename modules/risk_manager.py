@@ -5,12 +5,14 @@ Implements Conti's non-negotiable risk rules with true Deriv Multiplier math:
      the structural stop distance (|entry - stop_loss| / entry) and symbol multiplier.
   2. Cash + Open Stake Equity Accounting: Prevents active margin stakes from
      falsely tripping the 5% daily drawdown circuit breaker.
-  3. Exchange-Synced Position Locks: Queries Deriv's live `portfolio` endpoint so
-     closed trades unlock automatically and open trades persist across UTC midnight.
+  3. Exchange-Synced Position Locks: Queries Deriv's live `portfolio` endpoint
+     (parsing `underlying_symbol`, `symbol`, and `shortcode`) + enforces a 15m
+     per-symbol cooldown so duplicate orders can never stack on the same candle.
   4. Correlation Exposure Cap: Limits total concurrent USD positions to MAX_CONCURRENT_TRADES.
 """
 
 import logging
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 import config
@@ -28,6 +30,7 @@ class SessionRiskState:
     realized_loss: float = 0.0
     circuit_breaker_tripped: bool = False
     active_symbols: set = field(default_factory=set)
+    last_entry_time: dict[str, float] = field(default_factory=dict)
 
     @property
     def effective_equity(self) -> float:
@@ -41,6 +44,24 @@ _risk_state = SessionRiskState()
 
 def get_risk_state() -> SessionRiskState:
     return _risk_state
+
+
+def _extract_contract_symbol(contract: dict) -> str | None:
+    """
+    Extract normalized symbol name from Deriv portfolio contract object across
+    both v3 WebSocket (`symbol` / `underlying`) and OTP WebSocket (`underlying_symbol` / `shortcode`).
+    """
+    for key in ("underlying_symbol", "symbol", "underlying"):
+        val = contract.get(key)
+        if val and isinstance(val, str):
+            return val
+
+    shortcode = (contract.get("shortcode") or "").upper()
+    if shortcode:
+        for configured_sym in config.SYMBOLS:
+            if configured_sym.upper() in shortcode:
+                return configured_sym
+    return None
 
 
 def _ensure_session_sync(cash_balance: float):
@@ -83,10 +104,16 @@ async def sync_open_positions() -> bool:
         total_open_stake = 0.0
 
         for c in contracts:
-            sym = c.get("symbol") or c.get("underlying")
+            sym = _extract_contract_symbol(c)
             if sym:
                 live_symbols.add(sym)
             total_open_stake += float(c.get("buy_price", 0.0))
+
+        # Preserve any symbol entered within the last 60 seconds against portfolio settlement lag
+        now_ts = time.time()
+        for sym, entry_ts in list(_risk_state.last_entry_time.items()):
+            if now_ts - entry_ts < 60.0 and sym in _risk_state.active_symbols:
+                live_symbols.add(sym)
 
         # Log any symbols that closed since last scan
         closed_syms = _risk_state.active_symbols - live_symbols
@@ -184,7 +211,10 @@ def calculate_order_risk(
         if leverage_factor > 0:
             # Exact stake required so that hitting `stop_loss` price loses `risk_usd`
             raw_stake = risk_usd / leverage_factor
-            max_margin_usd = max(config.MIN_STAKE_USD, min(config.MAX_STAKE_USD, balance * config.MAX_MARGIN_PER_TRADE_PCT))
+            max_margin_usd = max(
+                config.MIN_STAKE_USD,
+                min(config.MAX_STAKE_USD, balance * config.MAX_MARGIN_PER_TRADE_PCT),
+            )
             stake_usd = round(max(config.MIN_STAKE_USD, min(raw_stake, max_margin_usd)), 2)
 
             # Dollar stop loss corresponding to the structural stop price on `stake_usd`
@@ -204,22 +234,31 @@ def can_open_symbol(symbol: str) -> bool:
     """
     Ensure:
       1. No duplicate position is open on `symbol`.
-      2. Total concurrent positions across correlated USD pairs < MAX_CONCURRENT_TRADES.
+      2. Per-symbol M15 cooldown (`SYMBOL_COOLDOWN_S`) has elapsed since last entry.
+      3. Total concurrent positions across correlated USD pairs < MAX_CONCURRENT_TRADES.
     """
     if symbol in _risk_state.active_symbols:
         return False
     if len(_risk_state.active_symbols) >= config.MAX_CONCURRENT_TRADES:
         return False
+
+    cooldown_s = getattr(config, "SYMBOL_COOLDOWN_S", 0)
+    last_ts = _risk_state.last_entry_time.get(symbol, 0.0)
+    if cooldown_s > 0 and last_ts > 0 and (time.time() - last_ts) < cooldown_s:
+        return False
+
     return True
 
 
 def mark_symbol_active(symbol: str, stake_usd: float = 0.0):
     """Register symbol as active AFTER confirmed order execution."""
     _risk_state.active_symbols.add(symbol)
+    _risk_state.last_entry_time[symbol] = time.time()
     if stake_usd > 0:
         _risk_state.open_stakes_usd = round(_risk_state.open_stakes_usd + stake_usd, 2)
 
 
 def mark_symbol_closed(symbol: str):
-    """Release active symbol lock."""
+    """Release active symbol lock and clear cooldown for immediate re-evaluation if needed."""
     _risk_state.active_symbols.discard(symbol)
+    _risk_state.last_entry_time.pop(symbol, None)

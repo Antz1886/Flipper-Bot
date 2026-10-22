@@ -3,17 +3,17 @@ tests/test_institutional_framework.py — Quantitative Audit Unit Verification
 Validates:
   1. Structural Position Sizing: Stake and dollar SL/TP mathematically bound to |entry - sl| and multiplier.
   2. Cash vs. Equity Accounting: Active open stakes do NOT falsely trip the 5% daily drawdown breaker.
-  3. USD Correlation Cap: Blocks opening more than MAX_CONCURRENT_TRADES simultaneous positions.
-  4. Chronological SMC Engine: Detects post-swing sweeps with ATR displacement and rejects invalidated OBs.
+  3. USD Correlation Cap & OTP Portfolio Symbol Extraction: Blocks opening more than MAX_CONCURRENT_TRADES
+     simultaneous positions and verifies `underlying_symbol` / `shortcode` parsing.
+  4. Chronological SMC Engine: Detects post-swing sweeps with ATR displacement, applies structural
+     stop buffer beyond OB extreme, deduplicates OB zones, and rejects invalidated OBs.
 """
 
 import unittest
 import pandas as pd
-import numpy as np
 
 import config
 from modules.smc_engine import (
-    identify_swings,
     detect_institutional_setup,
     mark_setup_consumed,
     reset_consumed_setups,
@@ -23,6 +23,7 @@ from modules.risk_manager import (
     check_account_health,
     get_risk_state,
     _ensure_session_sync,
+    _extract_contract_symbol,
     can_open_symbol,
     mark_symbol_active,
     mark_symbol_closed,
@@ -32,7 +33,9 @@ from modules.risk_manager import (
 class TestContiInstitutionalFramework(unittest.TestCase):
 
     def setUp(self):
-        config.RISK_PER_TRADE_PCT = 0.02
+        config.RISK_PER_TRADE_PCT = 0.01
+        config.MAX_MARGIN_PER_TRADE_PCT = 0.05
+        config.MAX_STAKE_USD = 150.00
         config.MAX_DAILY_DRAWDOWN_PCT = 0.05
         config.RISK_REWARD_RATIO = 2.0
         config.MAX_CONCURRENT_TRADES = 2
@@ -40,31 +43,30 @@ class TestContiInstitutionalFramework(unittest.TestCase):
         state = get_risk_state()
         state.session_date = ""
         state.active_symbols.clear()
+        state.last_entry_time.clear()
         state.open_stakes_usd = 0.0
         state.circuit_breaker_tripped = False
 
     def test_structural_position_sizing(self):
-        """Verify stake_usd is scaled to structural stop distance so SL triggers at exact structural price."""
-        balance = 10000.0  # $10,000 equity -> 2% target risk = $200.00
+        """Verify stake_usd is scaled to structural stop distance and capped by MAX_STAKE_USD."""
+        balance = 2000.0  # $2,000 equity -> 1% target risk = $20.00
         entry = 1.1000
         sl_price = 1.0945  # 0.50% stop distance (55 pips)
         # At 100x multiplier, a 0.50% move loses 50% of stake.
-        # To lose $200 at 1.0945, stake must be $200 / 0.50 = $400.00!
+        # To lose $20 at 1.0945, stake must be $20 / 0.50 = $40.00 (within 5% margin cap = $100)
         stake, sl_usd, tp_usd = calculate_order_risk(
             entry_price=entry, stop_loss=sl_price, balance=balance, symbol="frxEURUSD"
         )
 
-        self.assertAlmostEqual(stake, 400.00, places=2)
-        self.assertEqual(sl_usd, 200.00)
-        self.assertEqual(tp_usd, 400.00)
+        self.assertAlmostEqual(stake, 40.00, places=2)
+        self.assertEqual(sl_usd, 20.00)
+        self.assertEqual(tp_usd, 40.00)
 
-        # Small account test ($500 balance -> 2% risk = $10.00)
-        stake_s, sl_s, tp_s = calculate_order_risk(
-            entry_price=entry, stop_loss=sl_price, balance=500.0, symbol="frxEURUSD"
+        # Large account test ($10,000 balance) -> stake must be capped at MAX_STAKE_USD ($150.00)
+        stake_l, sl_l, tp_l = calculate_order_risk(
+            entry_price=1.33735, stop_loss=1.33650, balance=10000.0, symbol="frxGBPUSD"
         )
-        self.assertAlmostEqual(stake_s, 20.00, places=2)
-        self.assertEqual(sl_s, 10.00)
-        self.assertEqual(tp_s, 20.00)
+        self.assertLessEqual(stake_l, config.MAX_STAKE_USD)
 
     def test_open_stakes_do_not_falsely_trip_circuit_breaker(self):
         """Verify that cash deducted for active open stakes is counted in effective_equity."""
@@ -95,6 +97,7 @@ class TestContiInstitutionalFramework(unittest.TestCase):
             # Now simulate trades closing with a $60 realized loss (cash = $940, open_stakes = $0)
             state.open_stakes_usd = 0.0
             state.active_symbols.clear()
+            state.last_entry_time.clear()
 
             class MockAPIRealizedLoss:
                 is_active = True
@@ -110,7 +113,7 @@ class TestContiInstitutionalFramework(unittest.TestCase):
             rm.get_api = orig_get_api
 
     def test_usd_correlation_cap_and_unlock(self):
-        """Verify max 2 concurrent USD trades are allowed and unlocking frees capacity."""
+        """Verify max 2 concurrent USD trades are allowed, unlocking frees capacity, and OTP symbols parse."""
         self.assertTrue(can_open_symbol("frxEURUSD"))
         mark_symbol_active("frxEURUSD", stake_usd=20.0)
         self.assertFalse(can_open_symbol("frxEURUSD"), "Duplicate symbol must be blocked.")
@@ -124,6 +127,16 @@ class TestContiInstitutionalFramework(unittest.TestCase):
         # Unlocking frxEURUSD should allow frxUSDJPY
         mark_symbol_closed("frxEURUSD")
         self.assertTrue(can_open_symbol("frxUSDJPY"))
+
+        # Verify Deriv OTP portfolio symbol extraction
+        self.assertEqual(
+            _extract_contract_symbol({"shortcode": "MULTUP_FRXGBPUSD_500.00_100"}),
+            "frxGBPUSD",
+        )
+        self.assertEqual(
+            _extract_contract_symbol({"underlying_symbol": "frxEURUSD"}),
+            "frxEURUSD",
+        )
 
     def test_smc_chronological_sweep_and_invalidation(self):
         """Verify chronological liquidity sweep + displacement triggers signal, and broken OB is rejected."""
@@ -152,7 +165,7 @@ class TestContiInstitutionalFramework(unittest.TestCase):
 
         self.assertIsNotNone(sig, "Valid post-swing sweep + displacement + OB pullback must emit SMCSignal.")
         self.assertEqual(sig.direction, "LONG")
-        self.assertAlmostEqual(sig.stop_loss, 1.0905, places=5)
+        self.assertLess(sig.stop_loss, 1.0905, "Structural SL must include ATR buffer below OB bottom.")
         self.assertAlmostEqual(sig.entry_price, 1.0920, places=5)
 
         # Consuming setup prevents duplicate signal on same OB

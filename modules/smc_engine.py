@@ -6,8 +6,12 @@ Implements Conti's single structural edge without lookahead bias or indicator cu
   3. Displacement / MSS Confirmation: Impulse rejection must exceed ATR displacement threshold.
   4. Walk-Forward Validation: Verifies the Order Block has not been invalidated (stopped out)
      or already mitigated & exhausted on intermediate bars.
-  5. Spread/Friction Guard: Enforces a minimum stop distance (>= MIN_STOP_ATR_RATIO * ATR)
-     so Deriv multiplier spread does not degrade the 1:2 R:R expectancy.
+  5. Spread & Structural Buffer Guard: Places the structural stop beyond the Order Block
+     extreme (`STRUCTURAL_SL_BUFFER_ATR`) and enforces `MIN_STOP_ATR_RATIO` so Deriv's
+     100x multiplier bid-ask spread cannot prematurely stop out trades in seconds.
+  6. Order-Block Zone Deduplication: Tracks both the swept swing level and the OB zone
+     boundaries so a single sweep candle that cleared multiple prior swings can never
+     trigger duplicate entries on consecutive scan cycles.
 """
 
 import logging
@@ -20,8 +24,8 @@ import config
 
 log = logging.getLogger(__name__)
 
-# Tracks already-executed setups (symbol, direction, rounded_sweep_level) to prevent duplicate entries on the same OB
-_consumed_setups: set[tuple[str, str, float]] = set()
+# Tracks already-executed setups to prevent duplicate entries on the same OB or sweep level
+_consumed_setups: set[tuple] = set()
 
 
 @dataclass
@@ -41,8 +45,9 @@ class SMCSignal:
 
 
 def mark_setup_consumed(signal: SMCSignal):
-    """Mark a specific liquidity sweep Order Block as consumed so it is never traded twice."""
-    _consumed_setups.add((signal.symbol, signal.direction, round(signal.sweep_level, 6)))
+    """Mark both the swept swing level and the Order Block zone as consumed so it is never traded twice."""
+    _consumed_setups.add(("SWEEP", signal.symbol, signal.direction, round(signal.sweep_level, 5)))
+    _consumed_setups.add(("OB", signal.symbol, signal.direction, round(signal.ob_bottom, 5), round(signal.ob_top, 5)))
 
 
 def reset_consumed_setups():
@@ -118,28 +123,27 @@ def _check_bullish_setup(
     3. Confirm bullish displacement (strong rejection range/body >= MIN_DISPLACEMENT_ATR * ATR).
     4. Walk forward through subsequent closed bars to ensure OB was NOT invalidated (`low <= ob_bottom`)
        and NOT already mitigated & exhausted.
-    5. Trigger entry if `current_price` is inside `[ob_bottom, ob_top]` and stop size >= MIN_STOP_ATR_RATIO * ATR.
+    5. Trigger entry if `current_price` is inside `[ob_bottom, ob_top]` with a structural stop buffer
+       beyond `ob_bottom`.
     """
     n_closed = len(closed_df)
     valid_sl_positions = np.where(~np.isnan(closed_df["swing_low"].values))[0]
     if len(valid_sl_positions) == 0:
         return None
 
-    # Evaluate the most recent confirmed swing lows (up to last 4) so that if a sweep candle
-    # itself becomes a confirmed swing low after `swing_len` bars, the swept swing low is still evaluated.
+    sl_buffer = getattr(config, "STRUCTURAL_SL_BUFFER_ATR", 0.35) * current_atr
+
     for sl_pos in reversed(valid_sl_positions[-4:]):
         sl_pos = int(sl_pos)
         recent_sl = float(closed_df["swing_low"].iloc[sl_pos])
 
-        if (symbol, "LONG", round(recent_sl, 6)) in _consumed_setups:
+        if ("SWEEP", symbol, "LONG", round(recent_sl, 5)) in _consumed_setups:
             continue
 
-        # A swing at sl_pos is only confirmed at sl_pos + swing_len.
         scan_start = max(sl_pos + swing_len, n_closed - 30)
         if scan_start >= n_closed:
             continue
 
-        # Ensure the swing level wasn't already broken by a full candle close before scan_start
         broken_early = False
         for pre_idx in range(sl_pos + 1, scan_start):
             if float(closed_df["close"].iloc[pre_idx]) < recent_sl:
@@ -158,11 +162,9 @@ def _check_bullish_setup(
             bar_high = float(bar["high"])
             bar_close = float(bar["close"])
 
-            # If a candle closes decisively below the swing low without rejecting, the level broke (not a sweep)
             if bar_close < recent_sl and (recent_sl - bar_close) > 0.25 * current_atr:
                 break
 
-            # Check for wick sweep below recent_sl that rejects back above recent_sl
             if bar_low < recent_sl and bar_close >= recent_sl:
                 rejection_tail = bar_close - bar_low
                 if rejection_tail >= config.MIN_DISPLACEMENT_ATR * current_atr:
@@ -189,8 +191,11 @@ def _check_bullish_setup(
         if ob_top <= ob_bottom:
             ob_top = float(sweep_bar["high"])
 
+        if ("OB", symbol, "LONG", round(ob_bottom, 5), round(ob_top, 5)) in _consumed_setups:
+            continue
+
         ob_height = ob_top - ob_bottom
-        if ob_height < config.MIN_STOP_ATR_RATIO * current_atr:
+        if ob_height < 0.35 * current_atr:
             continue
 
         # Walk forward from displacement bar + 1 to the end of closed_df
@@ -200,12 +205,10 @@ def _check_bullish_setup(
             k_low = float(closed_df["low"].iloc[k])
             k_high = float(closed_df["high"].iloc[k])
 
-            # 1. Invalidation check: If any subsequent closed bar broke below ob_bottom, setup is dead
             if k_low <= ob_bottom:
                 invalidated_or_spent = True
                 break
 
-            # 2. Check if already mitigated and rallied away (> 2R above ob_top)
             if k_low <= ob_top:
                 mitigated_previously = True
             if mitigated_previously and k_high >= ob_top + ob_height * config.RISK_REWARD_RATIO:
@@ -217,7 +220,7 @@ def _check_bullish_setup(
 
         # Mitigation Entry Check on current live price:
         if ob_bottom < current_price <= ob_top:
-            sl = ob_bottom
+            sl = ob_bottom - sl_buffer
             risk_dist = current_price - sl
             if risk_dist < config.MIN_STOP_ATR_RATIO * current_atr:
                 sl = current_price - (config.MIN_STOP_ATR_RATIO * current_atr)
@@ -262,11 +265,13 @@ def _check_bearish_setup(
     if len(valid_sh_positions) == 0:
         return None
 
+    sl_buffer = getattr(config, "STRUCTURAL_SL_BUFFER_ATR", 0.35) * current_atr
+
     for sh_pos in reversed(valid_sh_positions[-4:]):
         sh_pos = int(sh_pos)
         recent_sh = float(closed_df["swing_high"].iloc[sh_pos])
 
-        if (symbol, "SHORT", round(recent_sh, 6)) in _consumed_setups:
+        if ("SWEEP", symbol, "SHORT", round(recent_sh, 5)) in _consumed_setups:
             continue
 
         scan_start = max(sh_pos + swing_len, n_closed - 30)
@@ -320,8 +325,11 @@ def _check_bearish_setup(
         if ob_top <= ob_bottom:
             ob_bottom = float(sweep_bar["low"])
 
+        if ("OB", symbol, "SHORT", round(ob_bottom, 5), round(ob_top, 5)) in _consumed_setups:
+            continue
+
         ob_height = ob_top - ob_bottom
-        if ob_height < config.MIN_STOP_ATR_RATIO * current_atr:
+        if ob_height < 0.35 * current_atr:
             continue
 
         invalidated_or_spent = False
@@ -344,7 +352,7 @@ def _check_bearish_setup(
             continue
 
         if ob_bottom <= current_price < ob_top:
-            sl = ob_top
+            sl = ob_top + sl_buffer
             risk_dist = sl - current_price
             if risk_dist < config.MIN_STOP_ATR_RATIO * current_atr:
                 sl = current_price + (config.MIN_STOP_ATR_RATIO * current_atr)
