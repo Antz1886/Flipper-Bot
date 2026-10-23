@@ -147,6 +147,47 @@ async def sync_open_positions() -> bool:
             log.info(f"🔓 Position closed on exchange for {sym} — symbol lock released.")
             _risk_state.active_directions.pop(sym, None)
 
+        # Self-Healing Reconciliation & Continual Learning
+        try:
+            from modules.self_healer import get_self_healer
+            get_self_healer().reconcile_exchange_portfolio(contracts)
+
+            if closed_syms:
+                prof_resp = await api.send({"profit_table": 1, "limit": 5})
+                transactions = prof_resp.get("profit_table", {}).get("transactions", [])
+                for t in transactions:
+                    t_sym = _extract_contract_symbol(t)
+                    if t_sym in closed_syms:
+                        sell_price = float(t.get("sell_price", 0.0))
+                        buy_price = float(t.get("buy_price", 0.0))
+                        pnl = sell_price - buy_price
+                        r_mult = round(pnl / buy_price * 2.0, 2) if buy_price > 0 else 0.0
+                        exit_reason = "WIN_TP" if pnl > 0 else "LOSS_SL"
+
+                        get_self_healer().record_trade_result(r_mult, exit_reason)
+                        from modules.meta_learner import get_meta_learner
+                        from modules.trade_learner import get_session_phase, get_learner_db, TradePostMortem
+                        get_meta_learner().learn_from_trade(
+                            symbol=t_sym,
+                            session_phase=get_session_phase(),
+                            macro_pool_type="SWING",
+                            pnl_usd=pnl,
+                            r_multiple=r_mult,
+                            exit_reason=exit_reason,
+                        )
+                        get_learner_db().save_outcome(TradePostMortem(
+                            trade_id=str(t.get("contract_id", "")),
+                            exit_price=float(t.get("sell_spot", 0.0)),
+                            pnl_usd=pnl,
+                            r_multiple=r_mult,
+                            exit_reason=exit_reason,
+                            loss_root_cause="ORGANIC_STOP_OUT" if pnl <= 0 else None,
+                            holding_time_seconds=float(t.get("sell_time", 0)) - float(t.get("purchase_time", 0)),
+                            exit_time_utc=datetime.now(timezone.utc).isoformat(),
+                        ))
+        except Exception as heal_err:
+            log.debug(f"Self-healing reconciliation check skipped: {heal_err}")
+
         _risk_state.active_symbols = live_symbols
         _risk_state.active_directions = live_directions
         _risk_state.open_stakes_usd = round(total_open_stake, 2)
@@ -216,6 +257,7 @@ def calculate_order_risk(
     stop_loss: float,
     balance: float,
     symbol: str = "frxEURUSD",
+    risk_pct_override: Optional[float] = None,
 ) -> tuple[float, float, float]:
     """
     Calculate dynamic Deriv Multiplier stake_usd, stop_loss_usd, and take_profit_usd
@@ -228,7 +270,8 @@ def calculate_order_risk(
       (stake_usd, stop_loss_usd, take_profit_usd)
     """
     multiplier = float(config.SYMBOL_MULTIPLIERS.get(symbol, 100))
-    target_risk_usd = balance * config.RISK_PER_TRADE_PCT
+    risk_pct = risk_pct_override if risk_pct_override is not None else getattr(config, "RISK_PER_TRADE_PCT", 0.01)
+    target_risk_usd = balance * risk_pct
     max_risk_cap = min(config.MAX_STAKE_USD, balance * 0.05)
     risk_usd = max(config.MIN_STAKE_USD, min(target_risk_usd, max_risk_cap))
 

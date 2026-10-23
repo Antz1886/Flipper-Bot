@@ -146,6 +146,35 @@ async def evaluate_sluggish_ob_cancellations(
                 )
                 mark_symbol_closed(contract.symbol)
                 _tracked_contracts.pop(cid, None)
+
+                # Continual Learning & Self-Healing Integration
+                try:
+                    from modules.self_healer import get_self_healer
+                    from modules.meta_learner import get_meta_learner
+                    from modules.trade_learner import get_learner_db, TradePostMortem, get_session_phase
+
+                    get_self_healer().record_trade_result(r_multiple=-0.15, exit_reason="LOSS_DEAL_CANCELLATION")
+                    get_meta_learner().learn_from_trade(
+                        symbol=contract.symbol,
+                        session_phase=get_session_phase(),
+                        macro_pool_type="SWING",
+                        pnl_usd=-contract.cancellation_fee,
+                        r_multiple=-0.15,
+                        exit_reason="LOSS_DEAL_CANCELLATION",
+                    )
+                    get_learner_db().save_outcome(TradePostMortem(
+                        trade_id=str(contract.contract_id),
+                        exit_price=current_spot,
+                        pnl_usd=-contract.cancellation_fee,
+                        r_multiple=-0.15,
+                        exit_reason="LOSS_DEAL_CANCELLATION",
+                        loss_root_cause="SLUGGISH_OB_FAILURE",
+                        holding_time_seconds=now_ts - contract.entry_time,
+                        exit_time_utc=datetime.now(timezone.utc).isoformat(),
+                    ))
+                except Exception as learn_err:
+                    log.debug(f"Learning update on deal cancellation skipped: {learn_err}")
+
                 return True
             else:
                 err_msg = res.get("error", {}).get("message") if res else "No response"

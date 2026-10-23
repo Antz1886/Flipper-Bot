@@ -44,6 +44,9 @@ class SMCSignal:
     atr: float = 0.0
     macro_pool_desc: str = ""
     htf_equilibrium: float = 0.0
+    displacement_ratio: float = 1.0
+    htf_depth_pct: float = 0.50
+    macro_pool_type: str = "SWING"
 
 
 def mark_setup_consumed(signal: SMCSignal):
@@ -457,6 +460,12 @@ def _check_bullish_setup(
                 f"OB: [${ob_bottom:.5f} - ${ob_top:.5f}] | Entry: ${current_price:.5f} | "
                 f"SL: ${sl:.5f} | TP: ${tp:.5f} | ATR: {current_atr:.5f}"
             )
+            m_type = "SWING"
+            for candidate in ("PDL", "ASIA_LOW", "EQL", "PDH", "ASIA_HIGH", "EQH"):
+                if candidate in pool_desc.upper():
+                    m_type = candidate
+                    break
+
             return SMCSignal(
                 symbol=symbol,
                 direction="LONG",
@@ -471,6 +480,8 @@ def _check_bullish_setup(
                 rr_ratio=config.RISK_REWARD_RATIO,
                 atr=current_atr,
                 macro_pool_desc=pool_desc,
+                displacement_ratio=round(rejection_tail / current_atr, 2),
+                macro_pool_type=m_type,
             )
 
     return None
@@ -607,6 +618,12 @@ def _check_bearish_setup(
                 f"OB: [${ob_bottom:.5f} - ${ob_top:.5f}] | Entry: ${current_price:.5f} | "
                 f"SL: ${sl:.5f} | TP: ${tp:.5f} | ATR: {current_atr:.5f}"
             )
+            m_type = "SWING"
+            for candidate in ("PDH", "ASIA_HIGH", "EQH", "PDL", "ASIA_LOW", "EQL"):
+                if candidate in pool_desc.upper():
+                    m_type = candidate
+                    break
+
             return SMCSignal(
                 symbol=symbol,
                 direction="SHORT",
@@ -621,6 +638,8 @@ def _check_bearish_setup(
                 rr_ratio=config.RISK_REWARD_RATIO,
                 atr=current_atr,
                 macro_pool_desc=pool_desc,
+                displacement_ratio=round(rejection_tail / current_atr, 2),
+                macro_pool_type=m_type,
             )
 
     return None
@@ -661,6 +680,13 @@ def detect_institutional_setup(
     closed_swings = identify_swings(closed_df, config.SWING_LENGTH)
     macro_pools = extract_macro_liquidity_pools(symbol, closed_swings, current_atr)
 
+    # Calculate H4 dealing range depth if H4 data available
+    h4_depth = 0.50
+    if df_h4 is not None:
+        h4_h, h4_l, _ = calculate_h4_dealing_range(df_h4, getattr(config, "HTF_SWING_LENGTH", 3))
+        if h4_h and h4_l and h4_h > h4_l:
+            h4_depth = round(min(1.0, max(0.0, (current_price - h4_l) / (h4_h - h4_l))), 4)
+
     # 1. Check Bullish Setup
     bull_sig = _check_bullish_setup(symbol, closed_swings, current_price, current_atr, config.SWING_LENGTH, macro_pools)
     if bull_sig is not None:
@@ -670,6 +696,7 @@ def detect_institutional_setup(
             log.info(f"🚫 [HTF MATRIX REJECTION] {symbol} | {htf_msg}")
             return None
         bull_sig.htf_equilibrium = eq
+        bull_sig.htf_depth_pct = h4_depth
         return bull_sig
 
     # 2. Check Bearish Setup
@@ -681,6 +708,7 @@ def detect_institutional_setup(
             log.info(f"🚫 [HTF MATRIX REJECTION] {symbol} | {htf_msg}")
             return None
         bear_sig.htf_equilibrium = eq
+        bear_sig.htf_depth_pct = h4_depth
         return bear_sig
 
     return None

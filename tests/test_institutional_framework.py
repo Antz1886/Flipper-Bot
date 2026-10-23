@@ -13,13 +13,20 @@ Validates:
   9. Execution Spread Widening Filter: Rejects orders when live spread exceeds baseline limit.
   10. Tier-1 Economic News Embargo: Suspends USD trading ±30m around high-impact news.
   11. Chronological SMC Engine: Detects confirmed sweeps with ATR displacement, structural buffers, and OB invalidation.
+  12. Self-Healing Latency SLA Adaptation: Shifts Deal Cancellation trigger earlier during high broker latency.
+  13. Self-Healing Orphan & Ghost Reconciliation: Adopts untracked exchange contracts and purges ghost locks.
+  14. Self-Healing Defensive Risk Throttling: Cuts risk by 50% on loss streaks and auto-recovers on wins.
+  15. Bayesian Continual Meta-Learner: Updates posterior distributions from trade outcomes and vetoes weak regimes.
+  16. Trade Attribution & SQLite Persistence: Logs rich entry context vectors and loss root causes.
 """
 
 import unittest
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 import pandas as pd
 import asyncio
 import time
+import os
 
 import config
 from modules.smc_engine import (
@@ -58,6 +65,22 @@ from modules.news_embargo import (
     is_news_embargo_active,
     inject_custom_event,
     clear_events_cache,
+)
+from modules.self_healer import (
+    SelfHealingSupervisor,
+    get_self_healer,
+)
+from modules.meta_learner import (
+    MetaLearner,
+    get_meta_learner,
+    BayesianClusterState,
+)
+from modules.trade_learner import (
+    TradeLearnerDB,
+    TradeContext,
+    TradePostMortem,
+    get_session_phase,
+    classify_loss_root_cause,
 )
 
 
@@ -162,38 +185,31 @@ class TestContiInstitutionalFramework(unittest.TestCase):
         self.assertEqual(get_dxy_exposure("frxUSDJPY", "LONG"), "DXY_LONG")
         self.assertEqual(get_dxy_exposure("frxUSDJPY", "SHORT"), "DXY_SHORT")
 
-        # Open Long on Quote-USD (EURUSD)
         self.assertTrue(can_open_symbol("frxEURUSD", direction="LONG"))
         mark_symbol_active("frxEURUSD", stake_usd=20.0, direction="LONG")
 
-        # Second Quote-USD pair (GBPUSD) must be blocked
         self.assertFalse(
             can_open_symbol("frxGBPUSD", direction="LONG"),
             "Second Quote-USD trade must be blocked by MAX_QUOTE_USD_TRADES limit."
         )
 
-        # Opening USDJPY in SHORT direction (DXY_SHORT) is blocked by DXY Direction Lock
         self.assertFalse(
             can_open_symbol("frxUSDJPY", direction="SHORT"),
             "Stacked DXY_SHORT exposure must be blocked by DXY Direction Lock."
         )
 
-        # Opening USDJPY in LONG direction (DXY_LONG) is allowed (1 Base + 1 Quote)
         self.assertTrue(
             can_open_symbol("frxUSDJPY", direction="LONG"),
             "1 Base-USD trade in opposing DXY direction must be permitted."
         )
         mark_symbol_active("frxUSDJPY", stake_usd=20.0, direction="LONG")
 
-        # 3rd trade blocked by global MAX_CONCURRENT_TRADES = 2
         self.assertFalse(can_open_symbol("frxUSDCAD", direction="LONG"))
 
-        # Unlocking EURUSD frees Quote-USD slot
         mark_symbol_closed("frxEURUSD")
         self.assertFalse(can_open_symbol("frxGBPUSD", direction="SHORT"))
         self.assertTrue(can_open_symbol("frxGBPUSD", direction="LONG"))
 
-        # Verify Deriv OTP portfolio symbol extraction
         self.assertEqual(
             _extract_contract_symbol({"shortcode": "MULTUP_FRXGBPUSD_500.00_100"}),
             "frxGBPUSD",
@@ -316,25 +332,20 @@ class TestContiInstitutionalFramework(unittest.TestCase):
         Micro-Mechanic Fix 2: Verify order is rejected if the cancellation fee exceeds
         15% of the trade's 1% risk budget.
         """
-        # Risk budget: $20.00 stop-loss (1% of $2,000 equity).
-        # Max allowed cancellation fee: 15% of $20.00 = $3.00.
         stop_loss_usd = 20.00
         max_bleed_limit = stop_loss_usd * config.MAX_CANCELLATION_FEE_PCT_OF_RISK  # $3.00
 
-        # Case A: High implied volatility -> Deriv quotes fee of $4.50 (> $3.00 limit) -> REJECT
         expensive_fee = 4.50
         self.assertGreater(expensive_fee, max_bleed_limit)
 
-        # Case B: Normal volatility -> Deriv quotes fee of $1.50 (<= $3.00 limit) -> ACCEPT
         safe_fee = 1.50
         self.assertLessEqual(safe_fee, max_bleed_limit)
 
     def test_micro_mechanic_3_execution_spread_widening_filter(self):
         """
         Micro-Mechanic Fix 3: Verify order executor measures live spread and rejects
-        execution if spread exceeds baseline limit (e.g. 1.5 pips on EURUSD).
+        execution if spread exceeds baseline limit.
         """
-        # Mock Deriv ticks response with wide spread: ask=1.12000, bid=1.11976 (2.4 pips > 1.5 limit)
         class MockAPIWideSpread:
             is_active = True
             authorized = True
@@ -354,7 +365,6 @@ class TestContiInstitutionalFramework(unittest.TestCase):
             self.assertFalse(is_safe, "Wide spread (2.4 pips > 1.5 limit) must be rejected.")
             self.assertAlmostEqual(spread_pips, 2.40, places=2)
 
-            # Mock normal tight spread: ask=1.11984, bid=1.11976 (0.8 pips <= 1.5 limit)
             class MockAPITightSpread:
                 is_active = True
                 authorized = True
@@ -377,7 +387,6 @@ class TestContiInstitutionalFramework(unittest.TestCase):
         """
         config.ENFORCE_NEWS_EMBARGO = True
 
-        # Inject high-impact US Core CPI event scheduled for 14:30 UTC
         event_time = datetime(2026, 10, 23, 14, 30, tzinfo=timezone.utc)
         cpi_event = NewsEvent(
             title="Core CPI m/m",
@@ -387,21 +396,220 @@ class TestContiInstitutionalFramework(unittest.TestCase):
         )
         inject_custom_event(cpi_event)
 
-        # 1. At 14:10 UTC (20 minutes BEFORE release) -> Inside embargo window!
         dt_before = datetime(2026, 10, 23, 14, 10, tzinfo=timezone.utc)
         embargo_active, reason = is_news_embargo_active(now_dt=dt_before)
         self.assertTrue(embargo_active, "Must halt trading 20 minutes before CPI.")
         self.assertIn("Core CPI", reason)
 
-        # 2. At 14:45 UTC (15 minutes AFTER release) -> Inside embargo window!
         dt_after = datetime(2026, 10, 23, 14, 45, tzinfo=timezone.utc)
         embargo_active_after, _ = is_news_embargo_active(now_dt=dt_after)
         self.assertTrue(embargo_active_after, "Must halt trading 15 minutes after CPI.")
 
-        # 3. At 15:15 UTC (45 minutes AFTER release) -> Outside embargo window!
         dt_safe = datetime(2026, 10, 23, 15, 15, tzinfo=timezone.utc)
         embargo_safe, _ = is_news_embargo_active(now_dt=dt_safe)
         self.assertFalse(embargo_safe, "Trading should resume 45 minutes after CPI.")
+
+    def test_self_healing_latency_adaptation(self):
+        """
+        Self-Healing: Verify supervisor measures live WebSocket RTT and
+        dynamically shifts Deal Cancellation trigger earlier when latency spikes.
+        """
+        supervisor = SelfHealingSupervisor()
+        config.DEAL_CANCELLATION_TRIGGER_S = 895.0
+
+        class MockAPISlow:
+            is_active = True
+            authorized = True
+            async def send(self, payload):
+                await asyncio.sleep(0.06)  # Simulate 60ms delay
+                return {"ping": "pong"}
+
+        import modules.self_healer as sh
+        orig_get_api = sh.get_api
+        sh.get_api = lambda: MockAPISlow()
+
+        try:
+            # Simulate high rolling latency > 500ms
+            supervisor.metrics.rolling_rtt_ms = [650.0, 700.0, 750.0, 800.0]
+            asyncio.run(supervisor.measure_and_adapt_latency())
+
+            self.assertLess(
+                config.DEAL_CANCELLATION_TRIGGER_S,
+                895.0,
+                "SLA trigger must shift earlier than 895.0s during high broker latency."
+            )
+        finally:
+            sh.get_api = orig_get_api
+            config.DEAL_CANCELLATION_TRIGGER_S = 895.0
+
+    def test_self_healing_orphan_and_ghost_reconciliation(self):
+        """
+        Self-Healing: Verify supervisor automatically adopts untracked exchange contracts
+        and purges ghost symbol locks that no longer exist on the exchange.
+        """
+        supervisor = SelfHealingSupervisor()
+        risk_state = get_risk_state()
+
+        # Ghost lock setup: frxAUDUSD is locked locally but missing from exchange
+        risk_state.active_symbols.add("frxAUDUSD")
+        risk_state.last_entry_time["frxAUDUSD"] = time.time() - 100.0  # > 60s grace period
+
+        # Exchange portfolio has an untracked orphan contract on frxUSDJPY
+        portfolio_contracts = [
+            {
+                "contract_id": 888999,
+                "underlying_symbol": "frxUSDJPY",
+                "contract_type": "MULTUP",
+                "buy_price": 50.0,
+                "cancellation": {"ask_price": 2.50, "date_expiry": time.time() + 600},
+            }
+        ]
+
+        supervisor.reconcile_exchange_portfolio(portfolio_contracts)
+
+        # 1. Orphan contract on frxUSDJPY must be adopted into active symbols
+        self.assertIn("frxUSDJPY", risk_state.active_symbols)
+        self.assertIn("888999", get_tracked_cancellation_contracts())
+
+        # 2. Ghost lock on frxAUDUSD must be purged
+        self.assertNotIn("frxAUDUSD", risk_state.active_symbols)
+
+    def test_self_healing_defensive_risk_throttling(self):
+        """
+        Self-Healing: Verify supervisor throttles risk by 50% after 2 consecutive losses
+        and automatically restores full risk upon a winning trade.
+        """
+        supervisor = SelfHealingSupervisor()
+        base_risk = 0.01  # 1.0%
+
+        # Loss 1
+        supervisor.record_trade_result(r_multiple=-1.0, exit_reason="LOSS_SL")
+        self.assertEqual(supervisor.metrics.consecutive_losses, 1)
+        self.assertFalse(supervisor.metrics.defensive_mode_active)
+        self.assertEqual(supervisor.get_effective_risk_pct(base_risk), 0.01)
+
+        # Loss 2 -> Trips defensive throttle!
+        supervisor.record_trade_result(r_multiple=-0.15, exit_reason="LOSS_DEAL_CANCELLATION")
+        self.assertEqual(supervisor.metrics.consecutive_losses, 2)
+        self.assertTrue(supervisor.metrics.defensive_mode_active)
+        self.assertEqual(supervisor.get_effective_risk_pct(base_risk), 0.005)  # 0.50% risk
+
+        # Win 1 -> Auto-recovers to full risk!
+        supervisor.record_trade_result(r_multiple=2.0, exit_reason="WIN_TP")
+        self.assertEqual(supervisor.metrics.consecutive_losses, 0)
+        self.assertFalse(supervisor.metrics.defensive_mode_active)
+        self.assertEqual(supervisor.get_effective_risk_pct(base_risk), 0.01)
+
+    def test_bayesian_meta_learner_conviction_and_veto(self):
+        """
+        Self-Improving: Verify Bayesian Meta-Learner updates posterior distributions
+        and vetoes setup clusters that exhibit negative empirical expectancy (E[R] < 0).
+        """
+        test_state_file = Path("data/test_meta_learner_state.json")
+        if os.path.exists(test_state_file):
+            os.remove(test_state_file)
+
+        learner = MetaLearner(state_file=test_state_file)
+        symbol = "frxEURUSD"
+        session = "LONDON_OPEN"
+        pool = "PDL"
+
+        # 1. Initial prior evaluation -> Authorized with moderate conviction
+        approved, score, risk_pct, reason = learner.evaluate_setup_conviction(
+            symbol=symbol, session_phase=session, macro_pool_type=pool, displacement_ratio=1.1, htf_depth_pct=0.25
+        )
+        self.assertTrue(approved)
+        self.assertGreaterEqual(score, 0.50)
+
+        # 2. Simulate 3 consecutive bad losses in this specific cluster
+        for _ in range(3):
+            learner.learn_from_trade(
+                symbol=symbol,
+                session_phase=session,
+                macro_pool_type=pool,
+                pnl_usd=-20.0,
+                r_multiple=-1.0,
+                exit_reason="LOSS_SL",
+                save=False,
+            )
+
+        # 3. Post-losses evaluation -> Veto Rule must trigger!
+        approved_after_losses, score_low, _, veto_reason = learner.evaluate_setup_conviction(
+            symbol=symbol, session_phase=session, macro_pool_type=pool
+        )
+        self.assertFalse(approved_after_losses, "Cluster with E[R] < 0 must be vetoed.")
+        self.assertIn("Vetoing to prevent repeat loss", veto_reason)
+
+        # 4. Cleanup
+        if os.path.exists(test_state_file):
+            os.remove(test_state_file)
+
+    def test_trade_learner_sqlite_persistence(self):
+        """
+        Self-Improving: Verify TradeLearnerDB persists entry context vectors,
+        loss root causes, and computes post-mortem attribution records.
+        """
+        test_db_path = Path("data/test_learner_history.sqlite")
+        if os.path.exists(test_db_path):
+            os.remove(test_db_path)
+
+        db = TradeLearnerDB(db_path=test_db_path)
+
+        # Save trade context
+        ctx = TradeContext(
+            trade_id="TEST_001",
+            contract_id="CID_123",
+            symbol="frxEURUSD",
+            direction="LONG",
+            entry_price=1.1000,
+            stop_loss=1.0950,
+            take_profit=1.1100,
+            stake_usd=40.0,
+            potential_risk_usd=20.0,
+            ob_top=1.0960,
+            ob_bottom=1.0950,
+            displacement_atr_ratio=1.25,
+            htf_depth_pct=0.20,
+            macro_pool_type="PDL",
+            session_phase="LONDON_OPEN",
+            atr=0.0012,
+            spread_pips=0.8,
+            entry_time_utc=datetime.now(timezone.utc).isoformat(),
+        )
+        db.save_context(ctx)
+
+        # Save trade outcome
+        outcome = TradePostMortem(
+            trade_id="TEST_001",
+            exit_price=1.1100,
+            pnl_usd=40.0,
+            r_multiple=2.0,
+            exit_reason="WIN_TP",
+            loss_root_cause=None,
+            holding_time_seconds=750.0,
+            exit_time_utc=datetime.now(timezone.utc).isoformat(),
+        )
+        db.save_outcome(outcome)
+
+        recent = db.get_recent_trades(limit=10)
+        self.assertEqual(len(recent), 1)
+        self.assertEqual(recent[0]["trade_id"], "TEST_001")
+        self.assertEqual(recent[0]["r_multiple"], 2.0)
+        self.assertEqual(recent[0]["exit_reason"], "WIN_TP")
+
+        # Test loss root cause classification
+        cause = classify_loss_root_cause(
+            exit_reason="LOSS_DEAL_CANCELLATION",
+            holding_time_seconds=895.0,
+            spread_at_entry=1.2,
+            max_spread_allowed=1.5,
+            displacement_ratio=1.1,
+        )
+        self.assertEqual(cause, "SLUGGISH_OB_FAILURE")
+
+        # Cleanup
+        if os.path.exists(test_db_path):
+            os.remove(test_db_path)
 
     def test_smc_chronological_sweep_and_invalidation(self):
         """Verify chronological liquidity sweep + displacement triggers signal, and broken OB is rejected."""
@@ -414,14 +622,11 @@ class TestContiInstitutionalFramework(unittest.TestCase):
             else:
                 data.append({"open": 1.0960, "high": 1.0970, "low": 1.0950, "close": 1.0962})
 
-        # Bar 40: Sweep below 1.0920 down to 1.0905, close strongly at 1.0930
         data.append({"open": 1.0925, "high": 1.0935, "low": 1.0905, "close": 1.0930})
 
-        # Bars 41..48: Rally above the OB without breaking 1.0905
         for i in range(41, 49):
             data.append({"open": 1.0935, "high": 1.0948, "low": 1.0932, "close": 1.0942})
 
-        # Bar 49 (Live forming candle): Pulls back into the OB [1.0905, 1.0930] at 1.0920
         data.append({"open": 1.0940, "high": 1.0940, "low": 1.0918, "close": 1.0920})
 
         df = pd.DataFrame(data, index=dates)
