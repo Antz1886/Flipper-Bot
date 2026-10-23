@@ -119,11 +119,11 @@ def sync_calendar_if_needed(force: bool = False):
     now_ts = time.time()
     sync_interval = getattr(config, "CALENDAR_SYNC_INTERVAL_S", 3600)
 
-    if force or not _cached_events or (now_ts - _last_sync_timestamp) > sync_interval:
+    if force or _last_sync_timestamp == 0.0 or (now_ts - _last_sync_timestamp) > sync_interval:
+        _last_sync_timestamp = now_ts
         fetched = fetch_economic_calendar()
-        if fetched or not _cached_events:
+        if fetched is not None:
             _cached_events = fetched
-            _last_sync_timestamp = now_ts
 
 
 def is_news_embargo_active(
