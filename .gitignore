@@ -1,8 +1,14 @@
 .env
 __pycache__/
+*/__pycache__/
+modules/__pycache__/
+tests/__pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.log
 logs/
 .venv/
+bot.pid
+data/
+scratch/

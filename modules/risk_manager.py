@@ -8,13 +8,16 @@ Implements Conti's non-negotiable risk rules with true Deriv Multiplier math:
   3. Exchange-Synced Position Locks: Queries Deriv's live `portfolio` endpoint
      (parsing `underlying_symbol`, `symbol`, and `shortcode`) + enforces a 15m
      per-symbol cooldown so duplicate orders can never stack on the same candle.
-  4. Correlation Exposure Cap: Limits total concurrent USD positions to MAX_CONCURRENT_TRADES.
+  4. Base / Quote USD Concurrency & DXY Correlation Direction Lock:
+     Limits base-USD pairs (max 1) and quote-USD pairs (max 1) to eliminate the
+     DXY correlation trap (e.g. going Long EURUSD and Long GBPUSD simultaneously).
 """
 
 import logging
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from typing import Optional
 import config
 from modules.connector import get_api
 
@@ -30,6 +33,7 @@ class SessionRiskState:
     realized_loss: float = 0.0
     circuit_breaker_tripped: bool = False
     active_symbols: set = field(default_factory=set)
+    active_directions: dict[str, str] = field(default_factory=dict)
     last_entry_time: dict[str, float] = field(default_factory=dict)
 
     @property
@@ -44,6 +48,22 @@ _risk_state = SessionRiskState()
 
 def get_risk_state() -> SessionRiskState:
     return _risk_state
+
+
+def get_dxy_exposure(symbol: str, direction: str) -> str:
+    """
+    Determine net US Dollar (DXY) directional exposure of a trade:
+      - Long Quote-USD (EURUSD, GBPUSD, AUDUSD) = DXY_SHORT (Selling USD)
+      - Short Quote-USD = DXY_LONG (Buying USD)
+      - Long Base-USD (USDJPY, USDCAD) = DXY_LONG (Buying USD)
+      - Short Base-USD = DXY_SHORT (Selling USD)
+    """
+    quote_pairs = set(getattr(config, "QUOTE_USD_PAIRS", ["frxEURUSD", "frxGBPUSD", "frxAUDUSD"]))
+    d = direction.upper()
+    if symbol in quote_pairs:
+        return "DXY_SHORT" if d == "LONG" else "DXY_LONG"
+    else:
+        return "DXY_LONG" if d == "LONG" else "DXY_SHORT"
 
 
 def _extract_contract_symbol(contract: dict) -> str | None:
@@ -87,7 +107,7 @@ def _ensure_session_sync(cash_balance: float):
 async def sync_open_positions() -> bool:
     """
     Query Deriv's live `portfolio` API to synchronize active multiplier contracts.
-    Automatically unlocks symbols whose contracts hit TP/SL and tracks active stakes.
+    Automatically unlocks symbols whose contracts hit TP/SL and tracks active stakes & directions.
     """
     api = get_api()
     if not api or not api.is_active or not api.authorized:
@@ -101,12 +121,16 @@ async def sync_open_positions() -> bool:
 
         contracts = resp.get("portfolio", {}).get("contracts", [])
         live_symbols = set()
+        live_directions = {}
         total_open_stake = 0.0
 
         for c in contracts:
             sym = _extract_contract_symbol(c)
             if sym:
                 live_symbols.add(sym)
+                c_type = (c.get("contract_type") or "").upper()
+                c_dir = "LONG" if "UP" in c_type or "CALL" in c_type else "SHORT"
+                live_directions[sym] = c_dir
             total_open_stake += float(c.get("buy_price", 0.0))
 
         # Preserve any symbol entered within the last 60 seconds against portfolio settlement lag
@@ -114,13 +138,17 @@ async def sync_open_positions() -> bool:
         for sym, entry_ts in list(_risk_state.last_entry_time.items()):
             if now_ts - entry_ts < 60.0 and sym in _risk_state.active_symbols:
                 live_symbols.add(sym)
+                if sym in _risk_state.active_directions:
+                    live_directions[sym] = _risk_state.active_directions[sym]
 
         # Log any symbols that closed since last scan
         closed_syms = _risk_state.active_symbols - live_symbols
         for sym in closed_syms:
             log.info(f"🔓 Position closed on exchange for {sym} — symbol lock released.")
+            _risk_state.active_directions.pop(sym, None)
 
         _risk_state.active_symbols = live_symbols
+        _risk_state.active_directions = live_directions
         _risk_state.open_stakes_usd = round(total_open_stake, 2)
         return True
 
@@ -206,40 +234,47 @@ def calculate_order_risk(
 
     if entry_price > 0 and stop_loss > 0 and entry_price != stop_loss:
         price_dist_pct = abs(entry_price - stop_loss) / entry_price
-        leverage_factor = multiplier * price_dist_pct  # Fraction of stake lost at structural SL
+        leverage_factor = multiplier * price_dist_pct
 
         if leverage_factor > 0:
-            # Exact stake required so that hitting `stop_loss` price loses `risk_usd`
             raw_stake = risk_usd / leverage_factor
             max_margin_usd = max(
                 config.MIN_STAKE_USD,
                 min(config.MAX_STAKE_USD, balance * config.MAX_MARGIN_PER_TRADE_PCT),
             )
             stake_usd = round(max(config.MIN_STAKE_USD, min(raw_stake, max_margin_usd)), 2)
-
-            # Dollar stop loss corresponding to the structural stop price on `stake_usd`
             structural_sl_usd = stake_usd * leverage_factor
             stop_loss_usd = round(max(config.MIN_STAKE_USD, min(stake_usd, risk_usd, structural_sl_usd)), 2)
             take_profit_usd = round(stop_loss_usd * config.RISK_REWARD_RATIO, 2)
             return stake_usd, stop_loss_usd, take_profit_usd
 
-    # Fallback if zero price distance passed
     stop_loss_usd = round(risk_usd, 2)
     take_profit_usd = round(stop_loss_usd * config.RISK_REWARD_RATIO, 2)
     stake_usd = stop_loss_usd
     return stake_usd, stop_loss_usd, take_profit_usd
 
 
-def can_open_symbol(symbol: str) -> bool:
+def can_open_symbol(symbol: str, direction: Optional[str] = None) -> bool:
     """
     Ensure:
       1. No duplicate position is open on `symbol`.
       2. Per-symbol M15 cooldown (`SYMBOL_COOLDOWN_S`) has elapsed since last entry.
-      3. Total concurrent positions across correlated USD pairs < MAX_CONCURRENT_TRADES.
+      3. Total concurrent positions < MAX_CONCURRENT_TRADES.
+      4. Concurrency limits on Base-USD (max 1) and Quote-USD (max 1) pairs.
+      5. DXY Correlation Direction Lock: Disallows stacking identical DXY directional exposure.
+      6. Tier-1 Macroeconomic Data Embargo: Disallows opening USD positions during high-impact news window.
     """
+    # 6. Tier-1 Economic News Embargo Check
+    if getattr(config, "ENFORCE_NEWS_EMBARGO", True):
+        from modules.news_embargo import is_news_embargo_active
+        embargo_active, embargo_reason = is_news_embargo_active()
+        if embargo_active:
+            log.warning(f"🚫 {embargo_reason} — blocking entry on {symbol}.")
+            return False
+
     if symbol in _risk_state.active_symbols:
         return False
-    if len(_risk_state.active_symbols) >= config.MAX_CONCURRENT_TRADES:
+    if len(_risk_state.active_symbols) >= getattr(config, "MAX_CONCURRENT_TRADES", 2):
         return False
 
     cooldown_s = getattr(config, "SYMBOL_COOLDOWN_S", 0)
@@ -247,12 +282,43 @@ def can_open_symbol(symbol: str) -> bool:
     if cooldown_s > 0 and last_ts > 0 and (time.time() - last_ts) < cooldown_s:
         return False
 
+    # 4. Enforce Base-USD (max 1) and Quote-USD (max 1) Concurrency
+    base_pairs = set(getattr(config, "BASE_USD_PAIRS", ["frxUSDJPY", "frxUSDCAD"]))
+    quote_pairs = set(getattr(config, "QUOTE_USD_PAIRS", ["frxEURUSD", "frxGBPUSD", "frxAUDUSD"]))
+    max_base = getattr(config, "MAX_BASE_USD_TRADES", 1)
+    max_quote = getattr(config, "MAX_QUOTE_USD_TRADES", 1)
+
+    active_base = [s for s in _risk_state.active_symbols if s in base_pairs]
+    active_quote = [s for s in _risk_state.active_symbols if s in quote_pairs]
+
+    if symbol in base_pairs and len(active_base) >= max_base:
+        log.info(f"⏭️ Skipping {symbol}: Base-USD pair concurrency limit ({len(active_base)}/{max_base}) reached.")
+        return False
+
+    if symbol in quote_pairs and len(active_quote) >= max_quote:
+        log.info(f"⏭️ Skipping {symbol}: Quote-USD pair concurrency limit ({len(active_quote)}/{max_quote}) reached.")
+        return False
+
+    # 5. DXY Correlation Direction Lock
+    if direction and getattr(config, "ENFORCE_DXY_DIRECTION_LOCK", True):
+        new_dxy = get_dxy_exposure(symbol, direction)
+        for act_sym, act_dir in _risk_state.active_directions.items():
+            existing_dxy = get_dxy_exposure(act_sym, act_dir)
+            if new_dxy == existing_dxy:
+                log.info(
+                    f"⏭️ Skipping {symbol} {direction}: DXY correlation trap! "
+                    f"Already holding {existing_dxy} via {act_sym} ({act_dir}). "
+                    f"Preventing stacked {new_dxy} exposure."
+                )
+                return False
+
     return True
 
 
-def mark_symbol_active(symbol: str, stake_usd: float = 0.0):
-    """Register symbol as active AFTER confirmed order execution."""
+def mark_symbol_active(symbol: str, stake_usd: float = 0.0, direction: str = "LONG"):
+    """Register symbol and direction as active AFTER confirmed order execution."""
     _risk_state.active_symbols.add(symbol)
+    _risk_state.active_directions[symbol] = direction.upper()
     _risk_state.last_entry_time[symbol] = time.time()
     if stake_usd > 0:
         _risk_state.open_stakes_usd = round(_risk_state.open_stakes_usd + stake_usd, 2)
@@ -261,4 +327,5 @@ def mark_symbol_active(symbol: str, stake_usd: float = 0.0):
 def mark_symbol_closed(symbol: str):
     """Release active symbol lock and clear cooldown for immediate re-evaluation if needed."""
     _risk_state.active_symbols.discard(symbol)
+    _risk_state.active_directions.pop(symbol, None)
     _risk_state.last_entry_time.pop(symbol, None)

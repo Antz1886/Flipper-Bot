@@ -1,21 +1,21 @@
 """
-modules/smc_engine.py — Quantitative Institutional SMC Engine
-Implements Conti's single structural edge without lookahead bias or indicator curve-fitting:
-  1. Closed-Bar Structural Pivots: Swing Highs/Lows computed strictly on closed candles.
-  2. Chronological Liquidity Sweep: Sweep must occur AFTER the swing pivot is confirmed.
-  3. Displacement / MSS Confirmation: Impulse rejection must exceed ATR displacement threshold.
-  4. Walk-Forward Validation: Verifies the Order Block has not been invalidated (stopped out)
-     or already mitigated & exhausted on intermediate bars.
-  5. Spread & Structural Buffer Guard: Places the structural stop beyond the Order Block
-     extreme (`STRUCTURAL_SL_BUFFER_ATR`) and enforces `MIN_STOP_ATR_RATIO` so Deriv's
-     100x multiplier bid-ask spread cannot prematurely stop out trades in seconds.
-  6. Order-Block Zone Deduplication: Tracks both the swept swing level and the OB zone
-     boundaries so a single sweep candle that cleared multiple prior swings can never
-     trigger duplicate entries on consecutive scan cycles.
+modules/smc_engine.py — Quantitative Institutional SMC Engine (Forex Majors Edition)
+Implements Conti's institutional structural edge with macro microstructure filters:
+  1. Macro Session Windows: Restricts sweeps & signals to London Open (07:00–11:00 GMT)
+     and New York Open (13:00–17:00 GMT). Asian session sweeps are discarded as low-volume fakeouts.
+  2. HTF Premium/Discount Dealing Range (H4): Authorizes Longs strictly in H4 Discount (< 50% equilibrium)
+     and Shorts strictly in H4 Premium (> 50% equilibrium).
+  3. Macro Liquidity Pool Intersection: Breached swing levels must align within 3–5 pips of
+     Previous Day High/Low (PDH/PDL), Asian Session High/Low, or Equal Highs/Lows (EQH/EQL).
+  4. Closed-Bar Structural Pivots: Swings computed strictly on confirmed closed bars.
+  5. Chronological Sweep & ATR Displacement: Rejection range/body must exceed `MIN_DISPLACEMENT_ATR`.
+  6. Walk-Forward Validation & Deduplication: Prevents duplicate execution on previously
+     consumed or invalidated Order Blocks.
 """
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone, time as time_cls
 from typing import Optional
 import pandas as pd
 import numpy as np
@@ -42,6 +42,8 @@ class SMCSignal:
     reward_price_distance: float
     rr_ratio: float
     atr: float = 0.0
+    macro_pool_desc: str = ""
+    htf_equilibrium: float = 0.0
 
 
 def mark_setup_consumed(signal: SMCSignal):
@@ -55,7 +57,53 @@ def reset_consumed_setups():
     _consumed_setups.clear()
 
 
-def calculate_atr(df: pd.DataFrame, period: int = config.ATR_PERIOD) -> pd.Series:
+# ─── 1. Macro Session Window Verification (London & New York) ─────────────────
+
+def is_in_macro_session(dt: Optional[datetime | pd.Timestamp] = None) -> bool:
+    """
+    Check if the given datetime (or current UTC time) falls within
+    the London Open (07:00–11:00 GMT) or New York Open (13:00–17:00 GMT) institutional windows.
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    elif isinstance(dt, pd.Timestamp):
+        dt = dt.to_pydatetime()
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+
+    cur_time = dt.time()
+    windows = getattr(config, "MACRO_SESSION_WINDOWS_UTC", [(7, 0, 11, 0), (13, 0, 17, 0)])
+
+    for (sh, sm, eh, em) in windows:
+        if time_cls(sh, sm) <= cur_time <= time_cls(eh, em):
+            return True
+    return False
+
+
+def _get_bar_timestamp(row_or_df) -> Optional[datetime]:
+    """Extract a timezone-aware UTC datetime from a Series row or index."""
+    if "time" in row_or_df:
+        val = row_or_df["time"]
+        if isinstance(val, (datetime, pd.Timestamp)):
+            dt = val.to_pydatetime() if hasattr(val, "to_pydatetime") else val
+            return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    if hasattr(row_or_df, "name") and isinstance(row_or_df.name, (datetime, pd.Timestamp)):
+        dt = row_or_df.name.to_pydatetime() if hasattr(row_or_df.name, "to_pydatetime") else row_or_df.name
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    return None
+
+
+# ─── 2. Pip Size & Mathematical Microstructure Helpers ───────────────────────
+
+def get_pip_size(symbol: str) -> float:
+    """Pip size for Forex majors: 0.01 for JPY pairs, 0.0001 for all others."""
+    return 0.01 if "JPY" in symbol.upper() else 0.0001
+
+
+def calculate_atr(df: pd.DataFrame, period: int = getattr(config, "ATR_PERIOD", 14)) -> pd.Series:
     """Calculate Wilder's / Simple Average True Range (ATR) on OHLC DataFrame."""
     high = df["high"].astype(float)
     low = df["low"].astype(float)
@@ -69,7 +117,7 @@ def calculate_atr(df: pd.DataFrame, period: int = config.ATR_PERIOD) -> pd.Serie
     return tr.rolling(window=period, min_periods=1).mean()
 
 
-def identify_swings(df: pd.DataFrame, swing_len: int = config.SWING_LENGTH) -> pd.DataFrame:
+def identify_swings(df: pd.DataFrame, swing_len: int = getattr(config, "SWING_LENGTH", 5)) -> pd.DataFrame:
     """
     Identify confirmed swing highs and swing lows without lookahead bias.
     A swing at index `i` is only confirmed once `i + swing_len` bars have closed.
@@ -86,7 +134,7 @@ def identify_swings(df: pd.DataFrame, swing_len: int = config.SWING_LENGTH) -> p
         current_h = highs[i]
         current_l = lows[i]
 
-        # Check Swing High: strictly higher than `swing_len` bars to the right, >= to the left
+        # Check Swing High
         is_sh = True
         for offset in range(1, swing_len + 1):
             if highs[i - offset] > current_h or highs[i + offset] >= current_h:
@@ -95,7 +143,7 @@ def identify_swings(df: pd.DataFrame, swing_len: int = config.SWING_LENGTH) -> p
         if is_sh:
             swing_highs[i] = current_h
 
-        # Check Swing Low: strictly lower than `swing_len` bars to the right, <= to the left
+        # Check Swing Low
         is_sl = True
         for offset in range(1, swing_len + 1):
             if lows[i - offset] < current_l or lows[i + offset] <= current_l:
@@ -109,29 +157,190 @@ def identify_swings(df: pd.DataFrame, swing_len: int = config.SWING_LENGTH) -> p
     return df
 
 
+# ─── 3. HTF Dealing Range & Premium/Discount Matrices ────────────────────────
+
+def calculate_h4_dealing_range(
+    df_h4: pd.DataFrame,
+    swing_len: int = getattr(config, "HTF_SWING_LENGTH", 3),
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Calculate the H4 dealing range from confirmed H4 Swing High and Swing Low:
+    Returns (h4_swing_high, h4_swing_low, equilibrium_50pct).
+    """
+    if df_h4 is None or len(df_h4) < (swing_len * 2 + 5):
+        return None, None, None
+
+    closed_h4 = df_h4.iloc[:-1].copy().reset_index(drop=True) if len(df_h4) > 5 else df_h4.copy().reset_index(drop=True)
+    swings = identify_swings(closed_h4, swing_len)
+
+    sh_indices = np.where(~np.isnan(swings["swing_high"].values))[0]
+    sl_indices = np.where(~np.isnan(swings["swing_low"].values))[0]
+
+    if len(sh_indices) == 0 or len(sl_indices) == 0:
+        return None, None, None
+
+    recent_sh = float(swings["swing_high"].iloc[sh_indices[-1]])
+    recent_sl = float(swings["swing_low"].iloc[sl_indices[-1]])
+
+    if recent_sh <= recent_sl:
+        # Scan back for the valid swing high that sits above the recent swing low
+        for sh_idx in reversed(sh_indices):
+            cand_sh = float(swings["swing_high"].iloc[sh_idx])
+            if cand_sh > recent_sl:
+                recent_sh = cand_sh
+                break
+
+    equilibrium = (recent_sh + recent_sl) / 2.0
+    return recent_sh, recent_sl, equilibrium
+
+
+def check_htf_premium_discount(
+    direction: str,
+    current_price: float,
+    df_h4: Optional[pd.DataFrame] = None,
+) -> tuple[bool, str, float]:
+    """
+    Enforce H4 dealing range equilibrium:
+    - Longs authorized ONLY in Discount (price < 50% equilibrium)
+    - Shorts authorized ONLY in Premium (price > 50% equilibrium)
+    """
+    if df_h4 is None or not getattr(config, "ENFORCE_HTF_PREMIUM_DISCOUNT", True):
+        return True, "HTF filter disabled or no H4 data provided", 0.0
+
+    h4_high, h4_low, equilibrium = calculate_h4_dealing_range(df_h4, getattr(config, "HTF_SWING_LENGTH", 3))
+    if equilibrium is None or h4_high is None or h4_low is None:
+        return True, "No confirmed H4 dealing range identified; proceeding on M15 structure", 0.0
+
+    if direction.upper() == "LONG":
+        if current_price > equilibrium:
+            return (
+                False,
+                f"Price {current_price:.5f} is in H4 Premium zone (> 50% Eq: {equilibrium:.5f}, Range: [{h4_low:.5f} - {h4_high:.5f}]). Longs restricted to Discount.",
+                equilibrium,
+            )
+        return True, f"Price {current_price:.5f} is in H4 Discount zone (< 50% Eq: {equilibrium:.5f})", equilibrium
+
+    elif direction.upper() == "SHORT":
+        if current_price < equilibrium:
+            return (
+                False,
+                f"Price {current_price:.5f} is in H4 Discount zone (< 50% Eq: {equilibrium:.5f}, Range: [{h4_low:.5f} - {h4_high:.5f}]). Shorts restricted to Premium.",
+                equilibrium,
+            )
+        return True, f"Price {current_price:.5f} is in H4 Premium zone (> 50% Eq: {equilibrium:.5f})", equilibrium
+
+    return True, "Neutral", 0.0
+
+
+# ─── 4. Macro Liquidity Pool Filters (PDH/PDL, Asia H/L, EQH/EQL) ────────────
+
+def extract_macro_liquidity_pools(
+    symbol: str,
+    closed_df: pd.DataFrame,
+    current_atr: float,
+) -> list[dict]:
+    """
+    Extract Macro Liquidity Pools from historical price action:
+      1. PDH / PDL (Previous Day High & Low)
+      2. Asian Session High & Low (00:00 - 07:00 UTC)
+      3. EQH / EQL (Equal Highs and Equal Lows within pip tolerance)
+    """
+    pools = []
+    pip_size = get_pip_size(symbol)
+    pip_tol = getattr(config, "MACRO_POOL_PIP_TOLERANCE", 5.0)
+    price_tol = max(pip_tol * pip_size, 0.20 * current_atr)
+
+    has_time = "time" in closed_df.columns or isinstance(closed_df.index, pd.DatetimeIndex)
+
+    if has_time:
+        times = closed_df["time"] if "time" in closed_df.columns else pd.Series(closed_df.index)
+        times_utc = pd.to_datetime(times, utc=True)
+        temp_df = closed_df.copy()
+        temp_df["_time_utc"] = times_utc
+        temp_df["_date"] = temp_df["_time_utc"].dt.date
+        temp_df["_hour"] = temp_df["_time_utc"].dt.hour
+
+        unique_dates = temp_df["_date"].unique()
+        if len(unique_dates) >= 2:
+            prev_date = unique_dates[-2]
+            prev_bars = temp_df[temp_df["_date"] == prev_date]
+            if len(prev_bars) > 0:
+                pdh = float(prev_bars["high"].max())
+                pdl = float(prev_bars["low"].min())
+                pools.append({"type": "PDH", "price": pdh, "side": "HIGH", "desc": f"PDH (${pdh:.5f})"})
+                pools.append({"type": "PDL", "price": pdl, "side": "LOW", "desc": f"PDL (${pdl:.5f})"})
+
+        # Asian Session (00:00 - 07:00 UTC of latest date)
+        latest_date = unique_dates[-1]
+        asia_start = getattr(config, "ASIA_SESSION_START_UTC_HOUR", 0)
+        asia_end = getattr(config, "ASIA_SESSION_END_UTC_HOUR", 7)
+        asia_bars = temp_df[(temp_df["_date"] == latest_date) & (temp_df["_hour"] >= asia_start) & (temp_df["_hour"] < asia_end)]
+        if len(asia_bars) >= 2:
+            asia_h = float(asia_bars["high"].max())
+            asia_l = float(asia_bars["low"].min())
+            pools.append({"type": "ASIA_HIGH", "price": asia_h, "side": "HIGH", "desc": f"Asia High (${asia_h:.5f})"})
+            pools.append({"type": "ASIA_LOW", "price": asia_l, "side": "LOW", "desc": f"Asia Low (${asia_l:.5f})"})
+
+    # Equal Highs (EQH) and Equal Lows (EQL) from confirmed swings
+    sh_vals = closed_df["swing_high"].dropna().values if "swing_high" in closed_df.columns else []
+    sl_vals = closed_df["swing_low"].dropna().values if "swing_low" in closed_df.columns else []
+
+    for i in range(len(sh_vals)):
+        for j in range(i + 1, len(sh_vals)):
+            if abs(sh_vals[i] - sh_vals[j]) <= price_tol:
+                eqh_price = (sh_vals[i] + sh_vals[j]) / 2.0
+                pools.append({"type": "EQH", "price": eqh_price, "side": "HIGH", "desc": f"EQH (${eqh_price:.5f})"})
+
+    for i in range(len(sl_vals)):
+        for j in range(i + 1, len(sl_vals)):
+            if abs(sl_vals[i] - sl_vals[j]) <= price_tol:
+                eql_price = (sl_vals[i] + sl_vals[j]) / 2.0
+                pools.append({"type": "EQL", "price": eql_price, "side": "LOW", "desc": f"EQL (${eql_price:.5f})"})
+
+    return pools
+
+
+def is_near_macro_liquidity_pool(
+    symbol: str,
+    level: float,
+    side: str,  # "LOW" for bullish sweep, "HIGH" for bearish sweep
+    pools: list[dict],
+    tolerance_pips: float = getattr(config, "MACRO_POOL_PIP_TOLERANCE", 5.0),
+    current_atr: float = 0.0,
+) -> tuple[bool, str]:
+    """Check if a swept swing level aligns within tolerance of an existing macro liquidity pool."""
+    pip_size = get_pip_size(symbol)
+    price_tol = max(tolerance_pips * pip_size, 0.20 * current_atr if current_atr > 0 else 0.0)
+
+    for p in pools:
+        if p["side"] == side:
+            dist = abs(level - p["price"])
+            if dist <= price_tol:
+                dist_pips = dist / pip_size
+                return True, f"{p['desc']} within {dist_pips:.1f} pips"
+
+    return False, "No aligning macro liquidity pool"
+
+
+# ─── 5. Core SMC Setup Evaluators ─────────────────────────────────────────────
+
 def _check_bullish_setup(
     symbol: str,
     closed_df: pd.DataFrame,
     current_price: float,
     current_atr: float,
     swing_len: int,
+    macro_pools: list[dict],
 ) -> Optional[SMCSignal]:
-    """
-    Evaluate Bullish Institutional Setup:
-    1. Locate most recent confirmed Swing Low at positional index `sl_pos`.
-    2. Scan ONLY bars after `sl_pos + swing_len` for a liquidity sweep (`low < swing_low` and `close > swing_low`).
-    3. Confirm bullish displacement (strong rejection range/body >= MIN_DISPLACEMENT_ATR * ATR).
-    4. Walk forward through subsequent closed bars to ensure OB was NOT invalidated (`low <= ob_bottom`)
-       and NOT already mitigated & exhausted.
-    5. Trigger entry if `current_price` is inside `[ob_bottom, ob_top]` with a structural stop buffer
-       beyond `ob_bottom`.
-    """
+    """Evaluate Bullish Institutional Setup across recent confirmed Swing Lows."""
     n_closed = len(closed_df)
     valid_sl_positions = np.where(~np.isnan(closed_df["swing_low"].values))[0]
     if len(valid_sl_positions) == 0:
         return None
 
     sl_buffer = getattr(config, "STRUCTURAL_SL_BUFFER_ATR", 0.35) * current_atr
+    enforce_sessions = getattr(config, "ENFORCE_MACRO_SESSIONS", True)
+    enforce_pools = getattr(config, "ENFORCE_MACRO_LIQUIDITY_FILTER", True)
 
     for sl_pos in reversed(valid_sl_positions[-4:]):
         sl_pos = int(sl_pos)
@@ -139,6 +348,16 @@ def _check_bullish_setup(
 
         if ("SWEEP", symbol, "LONG", round(recent_sl, 5)) in _consumed_setups:
             continue
+
+        # Filter 4: Macro Liquidity Pool Intersection (must align with PDL, Asia Low, or EQL)
+        pool_desc = "Standard Swing Low"
+        if enforce_pools and len(macro_pools) > 0:
+            is_macro, p_desc = is_near_macro_liquidity_pool(
+                symbol, recent_sl, side="LOW", pools=macro_pools, current_atr=current_atr
+            )
+            if not is_macro:
+                continue
+            pool_desc = p_desc
 
         scan_start = max(sl_pos + swing_len, n_closed - 30)
         if scan_start >= n_closed:
@@ -166,6 +385,12 @@ def _check_bullish_setup(
                 break
 
             if bar_low < recent_sl and bar_close >= recent_sl:
+                # Filter 1: Check macro session window of the sweep bar
+                if enforce_sessions:
+                    bar_time = _get_bar_timestamp(bar)
+                    if bar_time and not is_in_macro_session(bar_time):
+                        continue
+
                 rejection_tail = bar_close - bar_low
                 if rejection_tail >= config.MIN_DISPLACEMENT_ATR * current_atr:
                     sweep_idx = idx
@@ -198,7 +423,7 @@ def _check_bullish_setup(
         if ob_height < 0.35 * current_atr:
             continue
 
-        # Walk forward from displacement bar + 1 to the end of closed_df
+        # Walk forward from displacement bar + 1 to end of closed_df
         invalidated_or_spent = False
         mitigated_previously = False
         for k in range(disp_idx + 1, n_closed):
@@ -228,7 +453,7 @@ def _check_bullish_setup(
 
             tp = current_price + (risk_dist * config.RISK_REWARD_RATIO)
             log.info(
-                f"🎯 [SMC BULLISH EDGE] {symbol} | Sweep Low: ${recent_sl:.5f} | "
+                f"🎯 [SMC BULLISH EDGE] {symbol} | Macro Pool: {pool_desc} | "
                 f"OB: [${ob_bottom:.5f} - ${ob_top:.5f}] | Entry: ${current_price:.5f} | "
                 f"SL: ${sl:.5f} | TP: ${tp:.5f} | ATR: {current_atr:.5f}"
             )
@@ -245,6 +470,7 @@ def _check_bullish_setup(
                 reward_price_distance=tp - current_price,
                 rr_ratio=config.RISK_REWARD_RATIO,
                 atr=current_atr,
+                macro_pool_desc=pool_desc,
             )
 
     return None
@@ -256,16 +482,17 @@ def _check_bearish_setup(
     current_price: float,
     current_atr: float,
     swing_len: int,
+    macro_pools: list[dict],
 ) -> Optional[SMCSignal]:
-    """
-    Evaluate Bearish Institutional Setup across recent confirmed Swing Highs.
-    """
+    """Evaluate Bearish Institutional Setup across recent confirmed Swing Highs."""
     n_closed = len(closed_df)
     valid_sh_positions = np.where(~np.isnan(closed_df["swing_high"].values))[0]
     if len(valid_sh_positions) == 0:
         return None
 
     sl_buffer = getattr(config, "STRUCTURAL_SL_BUFFER_ATR", 0.35) * current_atr
+    enforce_sessions = getattr(config, "ENFORCE_MACRO_SESSIONS", True)
+    enforce_pools = getattr(config, "ENFORCE_MACRO_LIQUIDITY_FILTER", True)
 
     for sh_pos in reversed(valid_sh_positions[-4:]):
         sh_pos = int(sh_pos)
@@ -273,6 +500,16 @@ def _check_bearish_setup(
 
         if ("SWEEP", symbol, "SHORT", round(recent_sh, 5)) in _consumed_setups:
             continue
+
+        # Filter 4: Macro Liquidity Pool Intersection (must align with PDH, Asia High, or EQH)
+        pool_desc = "Standard Swing High"
+        if enforce_pools and len(macro_pools) > 0:
+            is_macro, p_desc = is_near_macro_liquidity_pool(
+                symbol, recent_sh, side="HIGH", pools=macro_pools, current_atr=current_atr
+            )
+            if not is_macro:
+                continue
+            pool_desc = p_desc
 
         scan_start = max(sh_pos + swing_len, n_closed - 30)
         if scan_start >= n_closed:
@@ -300,6 +537,12 @@ def _check_bearish_setup(
                 break
 
             if bar_high > recent_sh and bar_close <= recent_sh:
+                # Filter 1: Check macro session window of the sweep bar
+                if enforce_sessions:
+                    bar_time = _get_bar_timestamp(bar)
+                    if bar_time and not is_in_macro_session(bar_time):
+                        continue
+
                 rejection_tail = bar_high - bar_close
                 if rejection_tail >= config.MIN_DISPLACEMENT_ATR * current_atr:
                     sweep_idx = idx
@@ -360,7 +603,7 @@ def _check_bearish_setup(
 
             tp = current_price - (risk_dist * config.RISK_REWARD_RATIO)
             log.info(
-                f"🎯 [SMC BEARISH EDGE] {symbol} | Sweep High: ${recent_sh:.5f} | "
+                f"🎯 [SMC BEARISH EDGE] {symbol} | Macro Pool: {pool_desc} | "
                 f"OB: [${ob_bottom:.5f} - ${ob_top:.5f}] | Entry: ${current_price:.5f} | "
                 f"SL: ${sl:.5f} | TP: ${tp:.5f} | ATR: {current_atr:.5f}"
             )
@@ -377,26 +620,38 @@ def _check_bearish_setup(
                 reward_price_distance=current_price - tp,
                 rr_ratio=config.RISK_REWARD_RATIO,
                 atr=current_atr,
+                macro_pool_desc=pool_desc,
             )
 
     return None
 
 
-def detect_institutional_setup(symbol: str, df: pd.DataFrame) -> Optional[SMCSignal]:
+def detect_institutional_setup(
+    symbol: str,
+    df: pd.DataFrame,
+    df_h4: Optional[pd.DataFrame] = None,
+) -> Optional[SMCSignal]:
     """
-    Evaluate structural price action on OHLC data:
-    - Separates closed historical bars (`df.iloc[:-1]`) from the live forming bar (`df.iloc[-1]`).
-    - Computes ATR and confirmed Swing Highs/Lows strictly on closed bars.
-    - Checks for unmitigated, non-invalidated Bullish or Bearish Order Block mitigations.
+    Evaluate structural price action with Macro Microstructure constraints:
+    - Verifies current execution time is within London/NY macro sessions.
+    - Filters liquidity sweeps to intersections with PDH/PDL, Asia H/L, or EQH/EQL pools.
+    - Evaluates unmitigated, non-invalidated Order Blocks.
+    - Strictly enforces H4 dealing range equilibrium (Longs in Discount, Shorts in Premium).
     """
     min_bars = config.SWING_LENGTH * 3 + 15
     if df is None or len(df) < min_bars:
         return None
 
-    # Live price from the actively forming candle
+    # Filter 1: Macro Session Gate (current evaluation time)
+    if getattr(config, "ENFORCE_MACRO_SESSIONS", True):
+        last_bar_time = _get_bar_timestamp(df.iloc[-1])
+        if not is_in_macro_session(last_bar_time):
+            return None
+
+    # Live price from actively forming candle
     current_price = float(df["close"].iloc[-1])
 
-    # Closed candles only for structural swings, sweeps, and ATR
+    # Closed candles strictly for structural swings, sweeps, ATR, and macro pools
     closed_df = df.iloc[:-1].copy().reset_index(drop=True)
     closed_df["atr"] = calculate_atr(closed_df, config.ATR_PERIOD)
     current_atr = float(closed_df["atr"].iloc[-1])
@@ -404,15 +659,28 @@ def detect_institutional_setup(symbol: str, df: pd.DataFrame) -> Optional[SMCSig
         return None
 
     closed_swings = identify_swings(closed_df, config.SWING_LENGTH)
+    macro_pools = extract_macro_liquidity_pools(symbol, closed_swings, current_atr)
 
-    # Check Bullish Setup first
-    bull_sig = _check_bullish_setup(symbol, closed_swings, current_price, current_atr, config.SWING_LENGTH)
+    # 1. Check Bullish Setup
+    bull_sig = _check_bullish_setup(symbol, closed_swings, current_price, current_atr, config.SWING_LENGTH, macro_pools)
     if bull_sig is not None:
+        # Filter 2: Enforce H4 Discount Matrix for Longs
+        htf_ok, htf_msg, eq = check_htf_premium_discount("LONG", bull_sig.entry_price, df_h4)
+        if not htf_ok:
+            log.info(f"🚫 [HTF MATRIX REJECTION] {symbol} | {htf_msg}")
+            return None
+        bull_sig.htf_equilibrium = eq
         return bull_sig
 
-    # Check Bearish Setup
-    bear_sig = _check_bearish_setup(symbol, closed_swings, current_price, current_atr, config.SWING_LENGTH)
+    # 2. Check Bearish Setup
+    bear_sig = _check_bearish_setup(symbol, closed_swings, current_price, current_atr, config.SWING_LENGTH, macro_pools)
     if bear_sig is not None:
+        # Filter 2: Enforce H4 Premium Matrix for Shorts
+        htf_ok, htf_msg, eq = check_htf_premium_discount("SHORT", bear_sig.entry_price, df_h4)
+        if not htf_ok:
+            log.info(f"🚫 [HTF MATRIX REJECTION] {symbol} | {htf_msg}")
+            return None
+        bear_sig.htf_equilibrium = eq
         return bear_sig
 
     return None
