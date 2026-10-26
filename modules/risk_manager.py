@@ -88,20 +88,22 @@ def _ensure_session_sync(cash_balance: float):
     """Synchronize or roll over the daily UTC session without losing open exchange locks."""
     global _risk_state
     today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    effective_eq = cash_balance + _risk_state.open_stakes_usd
+    virtual_override = getattr(config, "VIRTUAL_EQUITY", 0.0)
+    effective_eq = virtual_override if virtual_override > 0 else (cash_balance + _risk_state.open_stakes_usd)
+    effective_cash = virtual_override if virtual_override > 0 else cash_balance
 
     if _risk_state.session_date != today_utc:
         log.info(
             f"🌅 New Trading Session ({today_utc}) | Starting Equity: ${effective_eq:.2f} "
-            f"(Cash: ${cash_balance:.2f}, Active Stakes: ${_risk_state.open_stakes_usd:.2f})"
+            f"({'VIRTUAL OVERRIDE: $' + str(virtual_override) if virtual_override > 0 else 'Cash: $' + str(cash_balance) + ', Active Stakes: $' + str(_risk_state.open_stakes_usd)})"
         )
         _risk_state.session_date = today_utc
         _risk_state.starting_balance = effective_eq
-        _risk_state.current_balance = cash_balance
+        _risk_state.current_balance = effective_cash
         _risk_state.realized_loss = 0.0
         _risk_state.circuit_breaker_tripped = False
     else:
-        _risk_state.current_balance = cash_balance
+        _risk_state.current_balance = effective_cash
 
 
 async def sync_open_positions() -> bool:
@@ -219,19 +221,28 @@ def check_account_health() -> bool:
         return False
 
     _ensure_session_sync(balance)
-    equity = _risk_state.effective_equity
+    virtual_override = getattr(config, "VIRTUAL_EQUITY", 0.0)
+    equity = virtual_override if virtual_override > 0 else _risk_state.effective_equity
 
-    log.info(
-        f"Deriv Account | Equity: {api.currency} {equity:.2f} "
-        f"(Cash: {balance:.2f} | Open Stakes: {_risk_state.open_stakes_usd:.2f} | "
-        f"Active Trades: {len(_risk_state.active_symbols)}/{config.MAX_CONCURRENT_TRADES})"
-    )
+    if virtual_override > 0:
+        log.info(
+            f"Deriv Account | Real Cash: {api.currency} {balance:.2f} | "
+            f"VIRTUAL EQUITY: {api.currency} {equity:.2f} | Open Stakes: {_risk_state.open_stakes_usd:.2f} | "
+            f"Active Trades: {len(_risk_state.active_symbols)}/{config.MAX_CONCURRENT_TRADES}"
+        )
+    else:
+        log.info(
+            f"Deriv Account | Equity: {api.currency} {equity:.2f} "
+            f"(Cash: {balance:.2f} | Open Stakes: {_risk_state.open_stakes_usd:.2f} | "
+            f"Active Trades: {len(_risk_state.active_symbols)}/{config.MAX_CONCURRENT_TRADES})"
+        )
 
     # 1. Check absolute account floor
-    if equity < config.CIRCUIT_BREAKER_USD:
+    floor_threshold = min(config.CIRCUIT_BREAKER_USD, equity * 0.25) if virtual_override > 0 else config.CIRCUIT_BREAKER_USD
+    if equity < floor_threshold:
         log.warning(
             f"🛑 ABSOLUTE FLOOR BREACH: Equity {api.currency} {equity:.2f} "
-            f"is below minimum ${config.CIRCUIT_BREAKER_USD:.2f}. Halting trading."
+            f"is below minimum ${floor_threshold:.2f}. Halting trading."
         )
         return False
 
@@ -260,19 +271,32 @@ def calculate_order_risk(
     risk_pct_override: Optional[float] = None,
 ) -> tuple[float, float, float]:
     """
-    Calculate dynamic Deriv Multiplier stake_usd, stop_loss_usd, and take_profit_usd
-    mathematically linked to the structural stop-loss price distance:
-      - Fractional stop distance: delta = |entry_price - stop_loss| / entry_price
-      - Multiplier leverage: M = SYMBOL_MULTIPLIERS[symbol]
-      - Contract loss at structural SL: Loss_USD = Stake * M * delta
-      - Therefore, Required Stake: Stake = Target_Risk_USD / (M * delta)
-    Returns:
-      (stake_usd, stop_loss_usd, take_profit_usd)
+    Calculate Deriv Multiplier stake_usd, stop_loss_usd, and take_profit_usd.
+    Supports FIXED_STAKE_USD override (e.g. $2.00) and VIRTUAL_EQUITY.
     """
     multiplier = float(config.SYMBOL_MULTIPLIERS.get(symbol, 100))
+    fixed_stake = getattr(config, "FIXED_STAKE_USD", 0.0)
+
+    # 1. Fixed Stake Override (e.g. $2.00 trades)
+    if fixed_stake > 0:
+        stake_usd = round(fixed_stake, 2)
+        if entry_price > 0 and stop_loss > 0 and entry_price != stop_loss:
+            price_dist_pct = abs(entry_price - stop_loss) / entry_price
+            leverage_factor = multiplier * price_dist_pct
+            structural_sl_usd = stake_usd * leverage_factor
+            stop_loss_usd = round(max(0.30, min(stake_usd, structural_sl_usd)), 2)
+        else:
+            stop_loss_usd = round(stake_usd * 0.5, 2)
+        take_profit_usd = round(stop_loss_usd * config.RISK_REWARD_RATIO, 2)
+        return stake_usd, stop_loss_usd, take_profit_usd
+
+    # 2. Dynamic Sizing: Use VIRTUAL_EQUITY if set, otherwise real balance
+    virtual_override = getattr(config, "VIRTUAL_EQUITY", 0.0)
+    effective_balance = virtual_override if virtual_override > 0 else balance
+
     risk_pct = risk_pct_override if risk_pct_override is not None else getattr(config, "RISK_PER_TRADE_PCT", 0.01)
-    target_risk_usd = balance * risk_pct
-    max_risk_cap = min(config.MAX_STAKE_USD, balance * 0.05)
+    target_risk_usd = effective_balance * risk_pct
+    max_risk_cap = min(config.MAX_STAKE_USD, effective_balance * 0.05)
     risk_usd = max(config.MIN_STAKE_USD, min(target_risk_usd, max_risk_cap))
 
     if entry_price > 0 and stop_loss > 0 and entry_price != stop_loss:
@@ -283,7 +307,7 @@ def calculate_order_risk(
             raw_stake = risk_usd / leverage_factor
             max_margin_usd = max(
                 config.MIN_STAKE_USD,
-                min(config.MAX_STAKE_USD, balance * config.MAX_MARGIN_PER_TRADE_PCT),
+                min(config.MAX_STAKE_USD, effective_balance * config.MAX_MARGIN_PER_TRADE_PCT),
             )
             stake_usd = round(max(config.MIN_STAKE_USD, min(raw_stake, max_margin_usd)), 2)
             structural_sl_usd = stake_usd * leverage_factor

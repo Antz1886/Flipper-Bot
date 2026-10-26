@@ -136,6 +136,32 @@ class TestContiInstitutionalFramework(unittest.TestCase):
         )
         self.assertLessEqual(stake_l, config.MAX_STAKE_USD)
 
+    def test_fixed_stake_and_virtual_equity_sizing(self):
+        """Verify that FIXED_STAKE_USD forces exact $2.00 trades and VIRTUAL_EQUITY sizes to $20.00."""
+        orig_fixed = getattr(config, "FIXED_STAKE_USD", 0.0)
+        orig_virt = getattr(config, "VIRTUAL_EQUITY", 0.0)
+
+        try:
+            # 1. Fixed $2.00 stake override
+            config.FIXED_STAKE_USD = 2.00
+            stake, sl_usd, tp_usd = calculate_order_risk(
+                entry_price=1.1000, stop_loss=1.0975, balance=10000.0, symbol="frxEURUSD"
+            )
+            self.assertEqual(stake, 2.00, "Stake must equal fixed $2.00 override.")
+            self.assertGreater(sl_usd, 0.0)
+            self.assertEqual(tp_usd, round(sl_usd * 2.0, 2))
+
+            # 2. Virtual $20.00 equity sizing (dynamic 1% risk of $20 = $0.20, minimum $1.00 stake)
+            config.FIXED_STAKE_USD = 0.0
+            config.VIRTUAL_EQUITY = 20.00
+            stake_v, sl_v, tp_v = calculate_order_risk(
+                entry_price=1.1000, stop_loss=1.0950, balance=10000.0, symbol="frxEURUSD"
+            )
+            self.assertLessEqual(stake_v, 20.00, "Stake must be sized relative to $20 virtual equity.")
+        finally:
+            config.FIXED_STAKE_USD = orig_fixed
+            config.VIRTUAL_EQUITY = orig_virt
+
     def test_open_stakes_do_not_falsely_trip_circuit_breaker(self):
         """Verify that cash deducted for active open stakes is counted in effective_equity."""
         _ensure_session_sync(1000.0)

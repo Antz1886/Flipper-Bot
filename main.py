@@ -113,6 +113,10 @@ async def main():
     log.info(f"   News Embargo        : ±{getattr(config, 'NEWS_EMBARGO_MINUTES_BEFORE', 30)}m around Tier-1 USD releases")
     log.info(f"   DXY Correlation Cap : Max {getattr(config, 'MAX_BASE_USD_TRADES', 1)} Base-USD & {getattr(config, 'MAX_QUOTE_USD_TRADES', 1)} Quote-USD Trade")
     log.info(f"   Risk Mandate        : {config.RISK_PER_TRADE_PCT*100:.1f}% Equity Risk at Structural SL")
+    if getattr(config, "VIRTUAL_EQUITY", 0) > 0:
+        log.info(f"   Virtual Equity      : ${config.VIRTUAL_EQUITY:.2f} USD (Account Size Override)")
+    if getattr(config, "FIXED_STAKE_USD", 0) > 0:
+        log.info(f"   Fixed Stake Override: ${config.FIXED_STAKE_USD:.2f} USD per trade")
     log.info(f"   Target R:R          : 1:{config.RISK_REWARD_RATIO:.1f} Structural Projection")
     log.info(f"   Demo Testing        : {config.DEMO_MODE}")
     log.info("=" * 80)
@@ -165,10 +169,15 @@ async def main():
                 continue
 
             risk_state = get_risk_state()
+            virtual_eq = getattr(config, "VIRTUAL_EQUITY", 0.0)
             current_equity = (
-                risk_state.effective_equity
-                if (api and api.authorized and risk_state.effective_equity > 0)
-                else 1000.0
+                virtual_eq
+                if virtual_eq > 0
+                else (
+                    risk_state.effective_equity
+                    if (api and api.authorized and risk_state.effective_equity > 0)
+                    else 1000.0
+                )
             )
 
             # 4. Micro-Mechanic Fix 4: Check Tier-1 Economic News Embargo

@@ -116,6 +116,11 @@ MAX_STAKE_USD            = 150.00 # Conservative stake ceiling ($150.00) to prev
 MAX_DAILY_DRAWDOWN_PCT   = 0.05   # 5% hard daily equity drawdown circuit breaker
 CIRCUIT_BREAKER_USD      = 5.00   # Absolute account floor threshold
 
+# ─── Virtual Account Sizing & Stake Overrides ─────────────────────────────────
+# Set in .env to simulate a micro-account on a standard $10,000 demo (e.g. VIRTUAL_EQUITY=20.0, FIXED_STAKE_USD=2.0)
+VIRTUAL_EQUITY     = float(os.getenv("VIRTUAL_EQUITY", "0.0") or "0.0")
+FIXED_STAKE_USD    = float(os.getenv("FIXED_STAKE_USD", "0.0") or "0.0")
+
 # ─── System & Execution Settings ──────────────────────────────────────────────
 SCAN_INTERVAL_S = 15     # Scan cycle interval in seconds
 MAX_RETRIES     = 3
