@@ -58,11 +58,11 @@ MACRO_SESSION_WINDOWS_UTC = [
 ]
 ENFORCE_MACRO_SESSIONS = os.getenv("ENFORCE_MACRO_SESSIONS", "false").lower() == "true"
 
-# ─── 2. HTF Premium / Discount Matrices (H4 Dealing Range) ────────────────────
-HTF_TIMEFRAME_S               = 14400  # H4 timeframe in seconds (4 * 3600)
-HTF_SWING_LENGTH              = 3      # Swing length on H4 candles
-N_HTF_BARS_INGEST             = 80     # Sufficient H4 bars to establish dealing range
-ENFORCE_HTF_PREMIUM_DISCOUNT  = True
+# ─── 2. HTF Premium / Discount Matrices (HTF Dealing Range) ───────────────────
+HTF_TIMEFRAME_S               = int(os.getenv("HTF_TIMEFRAME_S", "3600"))  # H1 (3600s) dealing range for M5 execution
+HTF_SWING_LENGTH              = int(os.getenv("HTF_SWING_LENGTH", "3"))      # Swing length on HTF candles
+N_HTF_BARS_INGEST             = int(os.getenv("N_HTF_BARS_INGEST", "80"))     # Sufficient HTF bars to establish dealing range
+ENFORCE_HTF_PREMIUM_DISCOUNT  = os.getenv("ENFORCE_HTF_PREMIUM_DISCOUNT", "true").lower() == "true"
 
 # ─── 3. Micro-Mechanic Fix 1 & 2: Deal Cancellation SLA & Premium Bleed ──────
 USE_DEAL_CANCELLATION             = True
@@ -115,15 +115,17 @@ ENFORCE_DXY_DIRECTION_LOCK = True  # Disallows stacking same directional DXY ris
 MAX_CONCURRENT_TRADES      = 2     # Global cap: 1 Base + 1 Quote USD trade
 
 # ─── Core Institutional Edge: SMC Parameters ─────────────────────────────────
-SWING_LENGTH             = 5      # Candles left & right to confirm a swing high/low
-PRIMARY_TIMEFRAME_S      = 900    # M15 execution timeframe (900 seconds)
-N_BARS_INGEST            = 150    # Candles fetched for structural calculation
-RISK_REWARD_RATIO        = 2.0    # Minimum 1:2 R:R projected target
-ATR_PERIOD               = 14     # ATR lookback for volatility scaling
-MIN_STOP_ATR_RATIO       = 1.20   # Minimum stop distance (1.2x ATR) + structural buffer to beat 100x spread
-STRUCTURAL_SL_BUFFER_ATR = 0.35   # Extra ATR buffer beyond OB extreme to prevent wick/spread stop-outs
-MIN_DISPLACEMENT_ATR     = 0.80   # Impulse displacement body/range threshold relative to ATR
-SYMBOL_COOLDOWN_S        = 900    # Minimum 15m (1 M15 bar) cooldown between entries on the same symbol
+SWING_LENGTH                    = int(os.getenv("SWING_LENGTH", "5"))      # Default swing length (5 for Forex)
+SWING_LENGTH_SYNTHETICS         = int(os.getenv("SWING_LENGTH_SYNTHETICS", "3")) # Swing length optimized for Synthetics
+PRIMARY_TIMEFRAME_S             = int(os.getenv("PRIMARY_TIMEFRAME_S", "300"))    # Execution timeframe (300s = M5)
+N_BARS_INGEST                   = int(os.getenv("N_BARS_INGEST", "150"))    # Candles fetched for structural calculation
+RISK_REWARD_RATIO               = float(os.getenv("RISK_REWARD_RATIO", "2.0"))    # Minimum 1:2 R:R projected target
+ATR_PERIOD                      = 14     # ATR lookback for volatility scaling
+MIN_STOP_ATR_RATIO              = 1.20   # Minimum stop distance (1.2x ATR) + structural buffer to beat 100x spread
+STRUCTURAL_SL_BUFFER_ATR        = 0.35   # Extra ATR buffer beyond OB extreme to prevent wick/spread stop-outs
+MIN_DISPLACEMENT_ATR            = float(os.getenv("MIN_DISPLACEMENT_ATR", "0.80"))   # Impulse displacement threshold for Forex
+MIN_DISPLACEMENT_ATR_SYNTHETICS = float(os.getenv("MIN_DISPLACEMENT_ATR_SYNTHETICS", "0.50")) # 0.50 for Synthetics
+SYMBOL_COOLDOWN_S               = int(os.getenv("SYMBOL_COOLDOWN_S", "300"))    # Minimum 5m cooldown between entries on same symbol
 
 # ─── Hardcoded Institutional Risk Mandates ────────────────────────────────────
 RISK_PER_TRADE_PCT       = 0.01   # 1% of total account equity risked at structural stop-loss

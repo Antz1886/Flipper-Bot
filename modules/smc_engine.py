@@ -111,6 +111,22 @@ def get_pip_size(symbol: str) -> float:
     return 0.01 if "JPY" in sym else 0.0001
 
 
+def get_symbol_swing_length(symbol: str) -> int:
+    """Return asset-specific swing length (3 for 24/7 synthetics, 5 for forex majors)."""
+    sym = symbol.upper()
+    if sym.startswith(("R_", "1HZ", "HZ")):
+        return getattr(config, "SWING_LENGTH_SYNTHETICS", 3)
+    return getattr(config, "SWING_LENGTH", 5)
+
+
+def get_symbol_min_displacement(symbol: str) -> float:
+    """Return asset-specific minimum displacement ratio relative to ATR (0.50 for synthetics, 0.80 for forex)."""
+    sym = symbol.upper()
+    if sym.startswith(("R_", "1HZ", "HZ")):
+        return getattr(config, "MIN_DISPLACEMENT_ATR_SYNTHETICS", 0.50)
+    return getattr(config, "MIN_DISPLACEMENT_ATR", 0.80)
+
+
 def calculate_atr(df: pd.DataFrame, period: int = getattr(config, "ATR_PERIOD", 14)) -> pd.Series:
     """Calculate Wilder's / Simple Average True Range (ATR) on OHLC DataFrame."""
     high = df["high"].astype(float)
@@ -400,7 +416,8 @@ def _check_bullish_setup(
                         continue
 
                 rejection_tail = bar_close - bar_low
-                if rejection_tail >= config.MIN_DISPLACEMENT_ATR * current_atr:
+                min_disp = get_symbol_min_displacement(symbol) * current_atr
+                if rejection_tail >= min_disp:
                     sweep_idx = idx
                     disp_idx = idx
                     sweep_extreme_low = bar_low
@@ -408,7 +425,7 @@ def _check_bullish_setup(
                 elif idx + 1 < n_closed:
                     next_bar = closed_df.iloc[idx + 1]
                     next_body = float(next_bar["close"]) - float(next_bar["open"])
-                    if float(next_bar["close"]) > bar_high and next_body >= config.MIN_DISPLACEMENT_ATR * current_atr:
+                    if float(next_bar["close"]) > bar_high and next_body >= min_disp:
                         sweep_idx = idx
                         disp_idx = idx + 1
                         sweep_extreme_low = min(bar_low, float(next_bar["low"]))
@@ -451,8 +468,8 @@ def _check_bullish_setup(
         if invalidated_or_spent:
             continue
 
-        # Mitigation Entry Check on current live price:
-        if ob_bottom < current_price <= ob_top:
+        # Mitigation Entry Check on current live price (with 0.10 ATR entry tolerance):
+        if ob_bottom <= current_price <= (ob_top + 0.10 * current_atr):
             sl = ob_bottom - sl_buffer
             risk_dist = current_price - sl
             if risk_dist < config.MIN_STOP_ATR_RATIO * current_atr:
@@ -560,7 +577,8 @@ def _check_bearish_setup(
                         continue
 
                 rejection_tail = bar_high - bar_close
-                if rejection_tail >= config.MIN_DISPLACEMENT_ATR * current_atr:
+                min_disp = get_symbol_min_displacement(symbol) * current_atr
+                if rejection_tail >= min_disp:
                     sweep_idx = idx
                     disp_idx = idx
                     sweep_extreme_high = bar_high
@@ -568,7 +586,7 @@ def _check_bearish_setup(
                 elif idx + 1 < n_closed:
                     next_bar = closed_df.iloc[idx + 1]
                     next_body = float(next_bar["open"]) - float(next_bar["close"])
-                    if float(next_bar["close"]) < bar_low and next_body >= config.MIN_DISPLACEMENT_ATR * current_atr:
+                    if float(next_bar["close"]) < bar_low and next_body >= min_disp:
                         sweep_idx = idx
                         disp_idx = idx + 1
                         sweep_extreme_high = max(bar_high, float(next_bar["high"]))
@@ -610,7 +628,8 @@ def _check_bearish_setup(
         if invalidated_or_spent:
             continue
 
-        if ob_bottom <= current_price < ob_top:
+        # Mitigation Entry Check on current live price (with 0.10 ATR entry tolerance):
+        if (ob_bottom - 0.10 * current_atr) <= current_price <= ob_top:
             sl = ob_top + sl_buffer
             risk_dist = sl - current_price
             if risk_dist < config.MIN_STOP_ATR_RATIO * current_atr:
@@ -662,7 +681,8 @@ def detect_institutional_setup(
     - Evaluates unmitigated, non-invalidated Order Blocks.
     - Strictly enforces H4 dealing range equilibrium (Longs in Discount, Shorts in Premium).
     """
-    min_bars = config.SWING_LENGTH * 3 + 15
+    active_swing_len = get_symbol_swing_length(symbol)
+    min_bars = active_swing_len * 3 + 15
     if df is None or len(df) < min_bars:
         return None
 
@@ -682,7 +702,7 @@ def detect_institutional_setup(
     if current_atr <= 0 or np.isnan(current_atr):
         return None
 
-    closed_swings = identify_swings(closed_df, config.SWING_LENGTH)
+    closed_swings = identify_swings(closed_df, active_swing_len)
     macro_pools = extract_macro_liquidity_pools(symbol, closed_swings, current_atr)
 
     # Calculate H4 dealing range depth if H4 data available
@@ -693,7 +713,7 @@ def detect_institutional_setup(
             h4_depth = round(min(1.0, max(0.0, (current_price - h4_l) / (h4_h - h4_l))), 4)
 
     # 1. Check Bullish Setup
-    bull_sig = _check_bullish_setup(symbol, closed_swings, current_price, current_atr, config.SWING_LENGTH, macro_pools)
+    bull_sig = _check_bullish_setup(symbol, closed_swings, current_price, current_atr, active_swing_len, macro_pools)
     if bull_sig is not None:
         # Filter 2: Enforce H4 Discount Matrix for Longs
         htf_ok, htf_msg, eq = check_htf_premium_discount("LONG", bull_sig.entry_price, df_h4)
@@ -705,7 +725,7 @@ def detect_institutional_setup(
         return bull_sig
 
     # 2. Check Bearish Setup
-    bear_sig = _check_bearish_setup(symbol, closed_swings, current_price, current_atr, config.SWING_LENGTH, macro_pools)
+    bear_sig = _check_bearish_setup(symbol, closed_swings, current_price, current_atr, active_swing_len, macro_pools)
     if bear_sig is not None:
         # Filter 2: Enforce H4 Premium Matrix for Shorts
         htf_ok, htf_msg, eq = check_htf_premium_discount("SHORT", bear_sig.entry_price, df_h4)

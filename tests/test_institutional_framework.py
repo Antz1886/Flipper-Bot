@@ -718,6 +718,33 @@ class TestContiInstitutionalFramework(unittest.TestCase):
             "Order Block breached by an intermediate candle must be invalidated."
         )
 
+    def test_smc_synthetics_m5_setup(self):
+        """Verify synthetic indices utilize 3-bar swing length and 0.50 ATR displacement."""
+        reset_consumed_setups()
+        dates = pd.date_range("2026-01-01", periods=26, freq="5min")
+        data = []
+        # Base price 30000.0, ATR ~ 50.0
+        for i in range(20):
+            if i == 10:
+                data.append({"open": 30000.0, "high": 30050.0, "low": 29900.0, "close": 30010.0})
+            else:
+                data.append({"open": 30000.0, "high": 30040.0, "low": 29960.0, "close": 30010.0})
+
+        # Bar 20 sweeps swing low 29900 with 0.50+ ATR rejection wick
+        data.append({"open": 29920.0, "high": 29950.0, "low": 29850.0, "close": 29910.0})
+        # Next bars pull back into OB [29850, 29920]
+        for i in range(21, 25):
+            data.append({"open": 29940.0, "high": 29980.0, "low": 29930.0, "close": 29960.0})
+        # Forming candle touching OB
+        data.append({"open": 29940.0, "high": 29940.0, "low": 29900.0, "close": 29905.0})
+
+        df = pd.DataFrame(data, index=dates)
+        sig = detect_institutional_setup("R_75", df)
+        self.assertIsNotNone(sig, "Synthetic index should trigger SMC setup with 3-bar swings.")
+        self.assertEqual(sig.symbol, "R_75")
+        self.assertEqual(sig.direction, "LONG")
+        self.assertLess(sig.stop_loss, 29850.0)
+
 
 if __name__ == "__main__":
     unittest.main()
