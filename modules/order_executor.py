@@ -129,11 +129,27 @@ async def place_multiplier_contract(
 
         for attempt in range(1, config.MAX_RETRIES + 1):
             try:
-                # 1. Query proposal
-                prop_resp = await api.send(proposal_payload)
+                # 1. Query proposal with robust broker fallback for cancellation
+                try:
+                    prop_resp = await api.send(proposal_payload)
+                except RuntimeError as re:
+                    re_str = str(re).lower()
+                    if ("cancellation" in re_str or "contractbuyvalidationerror" in re_str) and "cancellation" in proposal_payload:
+                        log.warning(
+                            f"Deal cancellation rejected by Deriv for {symbol} ({re}). "
+                            f"Falling back to structural stop-loss (${stop_loss_usd:.2f}) & take-profit (${take_profit_usd:.2f})."
+                        )
+                        proposal_payload.pop("cancellation", None)
+                        proposal_payload["limit_order"] = {
+                            "stop_loss": stop_loss_usd,
+                            "take_profit": take_profit_usd,
+                        }
+                        prop_resp = await api.send(proposal_payload)
+                    else:
+                        raise re
 
-                # Fallback if broker rejects cancellation for this asset (e.g. Forex on Deriv)
-                if "error" in prop_resp and "cancellation" in proposal_payload:
+                # Fallback if broker rejects cancellation in dict response
+                if isinstance(prop_resp, dict) and "error" in prop_resp and "cancellation" in proposal_payload:
                     err_msg = prop_resp["error"].get("message", "")
                     log.warning(
                         f"Deal cancellation unavailable for {symbol} ({err_msg}). "
@@ -146,7 +162,7 @@ async def place_multiplier_contract(
                     }
                     prop_resp = await api.send(proposal_payload)
 
-                if "error" in prop_resp:
+                if isinstance(prop_resp, dict) and "error" in prop_resp:
                     err = prop_resp["error"]
                     log.warning(
                         f"Proposal request failed (attempt {attempt}/{config.MAX_RETRIES}): "

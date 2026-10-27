@@ -367,6 +367,51 @@ class TestContiInstitutionalFramework(unittest.TestCase):
         safe_fee = 1.50
         self.assertLessEqual(safe_fee, max_bleed_limit)
 
+    def test_cancellation_unavailable_broker_fallback(self):
+        """
+        Verify that if Deriv rejects Deal Cancellation with ContractBuyValidationError,
+        the executor catches the exception and falls back to structural limit_order SL/TP.
+        """
+        import modules.order_executor as oe
+        orig_get_api = oe.get_api
+
+        class MockAPICancellationFallback:
+            is_active = True
+            authorized = True
+            currency = "USD"
+            call_count = 0
+
+            async def send(self, payload):
+                self.call_count += 1
+                if "ticks" in payload:
+                    return {"tick": {"ask": 1.10008, "bid": 1.10000, "quote": 1.10004, "symbol": "frxEURUSD"}}
+                if "proposal" in payload:
+                    if "cancellation" in payload:
+                        raise RuntimeError("Deriv error [ContractBuyValidationError]: Deal cancellation is not available for this asset.")
+                    elif "limit_order" in payload:
+                        return {"proposal": {"id": "PROP_FALLBACK_123", "ask_price": 2.0, "spot": 1.1000}}
+                if "buy" in payload:
+                    return {"buy": {"contract_id": 999111, "buy_price": 2.0}}
+                return {}
+
+        mock_api = MockAPICancellationFallback()
+        oe.get_api = lambda: mock_api
+
+        try:
+            res = asyncio.run(place_multiplier_contract(
+                symbol="frxEURUSD",
+                direction="LONG",
+                stake=2.0,
+                stop_loss_usd=0.50,
+                take_profit_usd=1.00,
+            ))
+            self.assertIsNotNone(res, "Order execution must succeed via automatic limit_order fallback.")
+            self.assertEqual(res["contract_id"], 999111)
+            self.assertFalse(res["has_deal_cancellation"])
+            self.assertGreaterEqual(mock_api.call_count, 3)  # ticks, failed proposal, fallback proposal, buy
+        finally:
+            oe.get_api = orig_get_api
+
     def test_micro_mechanic_3_execution_spread_widening_filter(self):
         """
         Micro-Mechanic Fix 3: Verify order executor measures live spread and rejects

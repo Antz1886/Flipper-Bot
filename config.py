@@ -84,7 +84,9 @@ CALENDAR_CACHE_FILE               = "logs/calendar_cache.json"
 CALENDAR_SYNC_INTERVAL_S          = 3600    # Refresh economic calendar hourly
 
 # ─── 6. Macro Liquidity Pool Filters (PDH/PDL, Asia H/L, EQH/EQL) ────────────
-ENFORCE_MACRO_LIQUIDITY_FILTER = True
+# When False (default), all confirmed M15 swing sweeps in session hours are traded, with macro pools adding conviction.
+# When True, strictly restricts setups to sweeps within 5 pips of PDH/PDL/Asia/EQL.
+ENFORCE_MACRO_LIQUIDITY_FILTER = os.getenv("ENFORCE_MACRO_LIQUIDITY_FILTER", "false").lower() == "true"
 MACRO_POOL_PIP_TOLERANCE       = 5.0    # 3-5 pips tolerance around macro liquidity pool
 ASIA_SESSION_START_UTC_HOUR    = 0      # Asian session: 00:00 UTC
 ASIA_SESSION_END_UTC_HOUR      = 7      # Asian session: 07:00 UTC (Tokyo/Sydney close before London)
