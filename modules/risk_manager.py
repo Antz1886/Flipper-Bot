@@ -78,9 +78,10 @@ def _extract_contract_symbol(contract: dict) -> str | None:
 
     shortcode = (contract.get("shortcode") or "").upper()
     if shortcode:
-        for configured_sym in config.SYMBOLS:
-            if configured_sym.upper() in shortcode:
-                return configured_sym
+        all_known_symbols = list(config.SYMBOLS) + list(getattr(config, "SYMBOL_MULTIPLIERS", {}).keys())
+        for known_sym in all_known_symbols:
+            if known_sym.upper() in shortcode:
+                return known_sym
     return None
 
 

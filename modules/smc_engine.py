@@ -102,8 +102,13 @@ def _get_bar_timestamp(row_or_df) -> Optional[datetime]:
 # ─── 2. Pip Size & Mathematical Microstructure Helpers ───────────────────────
 
 def get_pip_size(symbol: str) -> float:
-    """Pip size for Forex majors: 0.01 for JPY pairs, 0.0001 for all others."""
-    return 0.01 if "JPY" in symbol.upper() else 0.0001
+    """Pip / point size for Forex majors and Synthetic indices."""
+    sym = symbol.upper()
+    if sym in ("R_75", "1HZ75V"):
+        return 0.1
+    if sym in ("R_100", "1HZ100V", "R_50", "R_25"):
+        return 0.01
+    return 0.01 if "JPY" in sym else 0.0001
 
 
 def calculate_atr(df: pd.DataFrame, period: int = getattr(config, "ATR_PERIOD", 14)) -> pd.Series:

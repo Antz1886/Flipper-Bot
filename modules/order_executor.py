@@ -192,7 +192,7 @@ async def place_multiplier_contract(
                     date_expiry = cancellation_info.get("date_expiry")
 
                     max_bleed_pct = getattr(config, "MAX_CANCELLATION_FEE_PCT_OF_RISK", 0.15)
-                    min_allowed_fee = 0.35 if getattr(config, "FIXED_STAKE_USD", 0) > 0 else 0.0
+                    min_allowed_fee = 0.50 if getattr(config, "FIXED_STAKE_USD", 0) > 0 else 0.0
                     max_allowed_fee = max(min_allowed_fee, round(stop_loss_usd * max_bleed_pct, 2))
 
                     if cancellation_fee > max_allowed_fee:
