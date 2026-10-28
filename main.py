@@ -105,7 +105,10 @@ async def main():
     session_desc = "London (07:00-11:00 GMT) & NY (13:00-17:00 GMT)" if getattr(config, "ENFORCE_MACRO_SESSIONS", False) else "24/7 Continuous Algorithmic (Synthetics Mode)"
     tf_min = max(1, config.PRIMARY_TIMEFRAME_S // 60)
     htf_hr = round(config.HTF_TIMEFRAME_S / 3600, 1)
-    log.info(f"   Execution Strategy  : M{tf_min} SMC (SwingLen: {config.SWING_LENGTH}, Disp: {config.MIN_DISPLACEMENT_ATR*100:.0f}% ATR)")
+    is_synth = any(s.upper().startswith(("R_", "1HZ", "HZ")) for s in config.SYMBOLS)
+    active_swing = getattr(config, "SWING_LENGTH_SYNTHETICS", 3) if is_synth else getattr(config, "SWING_LENGTH", 5)
+    active_disp = getattr(config, "MIN_DISPLACEMENT_ATR_SYNTHETICS", 0.50) if is_synth else getattr(config, "MIN_DISPLACEMENT_ATR", 0.80)
+    log.info(f"   Execution Strategy  : M{tf_min} SMC (SwingLen: {active_swing}, Disp: {active_disp*100:.0f}% ATR)")
     log.info(f"   Macro Sessions      : {session_desc}")
     log.info(f"   HTF Dealing Range   : {htf_hr}H ({config.HTF_TIMEFRAME_S}s) Premium/Discount Matrix Enforced")
     log.info(f"   Self-Healing        : Active (Dynamic RTT SLA Adaptation & Orphan Reconciler)")
