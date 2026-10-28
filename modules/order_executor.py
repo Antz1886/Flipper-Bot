@@ -14,6 +14,7 @@ import asyncio
 import config
 from modules.connector import get_api
 from modules.risk_manager import can_open_symbol, mark_symbol_active
+from modules.smc_engine import get_pip_size
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ async def check_spread_safe(symbol: str) -> tuple[bool, float, float]:
         bid = tick.get("bid")
 
         if ask is not None and bid is not None and ask > bid:
-            pip_size = 0.01 if "JPY" in symbol.upper() else 0.0001
+            pip_size = get_pip_size(symbol)
             spread_pips = round((ask - bid) / pip_size, 2)
             max_spreads = getattr(config, "MAX_ALLOWED_SPREAD_PIPS", {})
             max_allowed = max_spreads.get(symbol, max_spreads.get("DEFAULT", 2.0))

@@ -76,17 +76,17 @@ MAX_CANCELLATION_FEE_PCT_OF_RISK  = 0.15
 # ─── 4. Micro-Mechanic Fix 3: Execution Spread Widening Filter ───────────────
 ENFORCE_SPREAD_FILTER             = True
 MAX_ALLOWED_SPREAD_PIPS = {
-    "R_75": 15.0,
-    "R_100": 8.0,
-    "R_50": 5.0,
-    "1HZ100V": 8.0,
-    "1HZ75V": 15.0,
+    "R_75": 100.0,    # Max 10.0 points spread (Deriv baseline ~6.0 points / 60 pips at 0.1/pip)
+    "R_100": 35.0,    # Max 0.35 points spread (Deriv baseline ~0.20 points / 20 pips at 0.01/pip)
+    "R_50": 8.0,      # Max 0.08 points spread (Deriv baseline ~0.02 points / 2 pips at 0.01/pip)
+    "1HZ100V": 35.0,  # Max 0.35 points spread (Deriv baseline ~0.20 points / 20 pips at 0.01/pip)
+    "1HZ75V": 100.0,  # Max 10.0 points spread (at 0.1/pip)
     "frxEURUSD": 1.5,
     "frxGBPUSD": 2.0,
     "frxUSDJPY": 1.8,
     "frxAUDUSD": 1.8,
     "frxUSDCAD": 2.0,
-    "DEFAULT": 10.0,
+    "DEFAULT": 20.0,
 }
 
 # ─── 5. Micro-Mechanic Fix 4: Tier-1 Macro News Embargo ──────────────────────
