@@ -1,11 +1,10 @@
 """
-modules/dbot_engine.py — Inbuilt Deriv Bot (DBot) Execution Engine
-Replicates the native Deriv Bot (DBot) strategy with institutional safety controls:
-  - Asset: Volatility 100 (1s) Index (1HZ100V) or user-configured synthetic
-  - Contract Type: 5-tick PUT (Fall) / CALL (Rise)
-  - Staking: Martingale progression ($2.00 -> $4.00 -> $8.00 -> $16.00 ...)
-  - Reset to Base Stake on every Win
-  - Circuit Breakers: Session Take Profit, Cumulative Stop Loss, Max Loss Streak Ceiling
+modules/dbot_engine.py — Institutional Deriv Bot (DBot) Execution Engine
+Quant Upgrade:
+  - Dynamic Direction Edge: Real-time tick momentum & micro-trend evaluation (PUT vs CALL)
+  - Real-Time WebSocket Streaming: Event-driven settlement tracking (zero polling lag)
+  - Atomic Session Persistence: Resilient state across reboots (P&L, streaks, Martingale tier)
+  - Institutional Circuit Breakers: Take profit, stop loss, max loss streak, balance pre-check
 """
 
 import asyncio
@@ -14,10 +13,13 @@ import logging
 import os
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 
 import config
 from modules import connector
+from modules.direction_engine import determine_contract_direction
+from modules.session_state import SessionStateManager
 
 log = logging.getLogger("dbot_engine")
 
@@ -26,6 +28,7 @@ class DBotEngine:
     def __init__(
         self,
         symbol: str = getattr(config, "DBOT_SYMBOL", "1HZ100V"),
+        direction_mode: str = getattr(config, "DBOT_DIRECTION_MODE", "DYNAMIC"),
         contract_type: str = getattr(config, "DBOT_CONTRACT_TYPE", "PUT"),
         duration: int = getattr(config, "DBOT_DURATION", 5),
         duration_unit: str = getattr(config, "DBOT_DURATION_UNIT", "t"),
@@ -37,8 +40,11 @@ class DBotEngine:
         take_profit_usd: float = getattr(config, "DBOT_TAKE_PROFIT_USD", 50.0),
         stop_loss_usd: float = getattr(config, "DBOT_STOP_LOSS_USD", 50.0),
         inter_trade_delay: float = getattr(config, "DBOT_INTER_TRADE_DELAY_S", 1.0),
+        persist_session: bool = getattr(config, "DBOT_PERSIST_SESSION", True),
+        use_streaming: bool = getattr(config, "DBOT_USE_STREAMING", True),
     ):
         self.symbol = symbol
+        self.direction_mode = direction_mode.upper()
         self.contract_type = contract_type.upper()
         self.duration = duration
         self.duration_unit = duration_unit
@@ -50,7 +56,10 @@ class DBotEngine:
         self.take_profit_usd = float(take_profit_usd)
         self.stop_loss_usd = float(stop_loss_usd)
         self.inter_trade_delay = float(inter_trade_delay)
+        self.persist_session = persist_session
+        self.use_streaming = use_streaming
 
+        self.session_id: str = uuid.uuid4().hex[:12]
         self.current_stake: float = self.base_stake
         self.consecutive_losses: int = 0
         self.consecutive_wins: int = 0
@@ -58,18 +67,54 @@ class DBotEngine:
         self.total_wins: int = 0
         self.total_losses: int = 0
         self.session_pnl: float = 0.0
+        self.session_status: str = "RUNNING"
 
         self.start_balance: float | None = None
         self.current_balance: float | None = None
         self.is_running: bool = False
 
+        self.state_mgr = SessionStateManager()
+        if self.persist_session:
+            self._restore_persisted_state()
+
+    def _restore_persisted_state(self):
+        """Restore active session metrics from disk if available."""
+        saved = self.state_mgr.load_active_session()
+        if saved:
+            self.session_id = saved.get("session_id", self.session_id)
+            self.total_trades = saved.get("total_trades", 0)
+            self.total_wins = saved.get("total_wins", 0)
+            self.total_losses = saved.get("total_losses", 0)
+            self.consecutive_wins = saved.get("consecutive_wins", 0)
+            self.consecutive_losses = saved.get("consecutive_losses", 0)
+            self.current_stake = float(saved.get("current_stake", self.base_stake))
+            self.session_pnl = float(saved.get("session_pnl", 0.0))
+            self.session_status = saved.get("status", "RUNNING")
+
+    def _save_current_state(self, status: str = "RUNNING"):
+        """Save active state to disk."""
+        self.session_status = status
+        if self.persist_session:
+            self.state_mgr.save_session(
+                session_id=self.session_id,
+                total_trades=self.total_trades,
+                total_wins=self.total_wins,
+                total_losses=self.total_losses,
+                consecutive_wins=self.consecutive_wins,
+                consecutive_losses=self.consecutive_losses,
+                current_stake=self.current_stake,
+                session_pnl=self.session_pnl,
+                status=status,
+            )
+
     def log_header(self):
         """Print institutional launch banner for Deriv Bot Mode."""
         log.info("=" * 80)
-        log.info("   DERIV INBUILT BOT (DBOT) REPLICA ENGINE — MARTINGALE QUANT")
+        log.info("   INSTITUTIONAL DERIV BOT (DBOT) ENGINE — QUANT EDITION")
         log.info("=" * 80)
         log.info(f"   Asset Symbol        : {self.symbol}")
-        log.info(f"   Contract Type       : {self.contract_type} ({'Fall' if self.contract_type == 'PUT' else 'Rise'})")
+        log.info(f"   Direction Mode      : {self.direction_mode} (Dynamic Tick Momentum)")
+        log.info(f"   Default Contract    : {self.contract_type} ({'Fall' if self.contract_type == 'PUT' else 'Rise'})")
         log.info(f"   Duration            : {self.duration} {self.duration_unit} (ticks)")
         log.info(f"   Base Stake          : ${self.base_stake:.2f} USD")
         log.info(f"   Martingale Ratio    : {self.martingale_multiplier:.1f}x (on loss)")
@@ -77,6 +122,8 @@ class DBotEngine:
         log.info(f"   Max Loss Streak     : {self.max_loss_streak} (Action: {self.action_on_max_loss})")
         log.info(f"   Session Take Profit : +${self.take_profit_usd:.2f} USD")
         log.info(f"   Session Stop Loss   : -${self.stop_loss_usd:.2f} USD")
+        log.info(f"   Streaming Execution : {'Real-Time WebSocket' if self.use_streaming else 'Polling (0.8s)'}")
+        log.info(f"   Session Persistence : {'Active (data/dbot_session.json)' if self.persist_session else 'Disabled'}")
         log.info(f"   Inter-Trade Delay   : {self.inter_trade_delay}s")
         log.info(f"   Account Mode        : {'DEMO' if getattr(config, 'DEMO_MODE', True) else 'REAL'}")
         log.info("=" * 80)
@@ -106,7 +153,7 @@ class DBotEngine:
             log.warning(f"Failed to fetch balance: {e}")
             return self.current_balance or 0.0
 
-    async def get_proposal(self, stake: float) -> dict | None:
+    async def get_proposal(self, stake: float, contract_type: str) -> dict | None:
         """Request price proposal for binary options contract."""
         api = await self._ensure_connection()
         symbol_key = "underlying_symbol" if getattr(api, "using_otp_ws", False) else "symbol"
@@ -114,7 +161,7 @@ class DBotEngine:
             "proposal": 1,
             "amount": round(stake, 2),
             "basis": "stake",
-            "contract_type": self.contract_type,
+            "contract_type": contract_type,
             "currency": api.currency or "USD",
             "duration": self.duration,
             "duration_unit": self.duration_unit,
@@ -158,20 +205,69 @@ class DBotEngine:
                 await asyncio.sleep(config.RETRY_DELAY_S)
         return None
 
-    async def wait_for_settlement(self, contract_id: int, timeout_s: float = 30.0) -> dict | None:
-        """Poll proposal_open_contract until contract settles (is_sold == 1)."""
+    async def wait_for_settlement(self, contract_id: int, timeout_s: float = 25.0) -> dict | None:
+        """
+        Wait for contract settlement.
+        Uses Real-Time WebSocket Streaming subscription for zero-lag notification,
+        with seamless fallback to polling if subscription stream drops.
+        """
         api = await self._ensure_connection()
+
+        if self.use_streaming:
+            settled_data: dict = {}
+            event = asyncio.Event()
+
+            async def on_contract_update(poc: dict):
+                try:
+                    cid = int(poc.get("contract_id", 0))
+                    if cid == contract_id:
+                        if poc.get("is_sold") or poc.get("status") in ("won", "lost"):
+                            settled_data.update(poc)
+                            event.set()
+                except Exception as ex:
+                    log.debug(f"Error handling streaming contract update: {ex}")
+
+            api.add_contract_handler(on_contract_update)
+            sub_id = None
+            try:
+                # Subscribe to contract stream
+                sub_resp = await api.send({
+                    "proposal_open_contract": 1,
+                    "contract_id": contract_id,
+                    "subscribe": 1,
+                })
+                sub_id = sub_resp.get("subscription", {}).get("id")
+
+                # Check if it was already settled in initial snapshot
+                init_poc = sub_resp.get("proposal_open_contract", {})
+                if init_poc.get("is_sold") or init_poc.get("status") in ("won", "lost"):
+                    return init_poc
+
+                await asyncio.wait_for(event.wait(), timeout=timeout_s)
+                if settled_data:
+                    return settled_data
+            except asyncio.TimeoutError:
+                log.warning(f"Streaming settlement timed out for #{contract_id}. Falling back to polling query.")
+            except Exception as e:
+                log.warning(f"Streaming subscription encountered error: {e}. Falling back to polling.")
+            finally:
+                api.remove_contract_handler(on_contract_update)
+                if sub_id:
+                    try:
+                        await api.send({"forget": sub_id})
+                    except Exception:
+                        pass
+
+        # Fallback Polling Loop
         start_t = time.time()
         while time.time() - start_t < timeout_s:
             try:
                 resp = await api.send({"proposal_open_contract": 1, "contract_id": contract_id})
                 poc = resp.get("proposal_open_contract")
-                if poc:
-                    is_sold = bool(poc.get("is_sold"))
-                    if is_sold:
-                        return poc
+                if poc and (poc.get("is_sold") or poc.get("status") in ("won", "lost")):
+                    return poc
             except Exception as e:
-                log.warning(f"Error querying contract settlement: {e}")
+                log.warning(f"Polling settlement error: {e}")
             await asyncio.sleep(0.8)
 
         log.warning(f"Contract {contract_id} settlement timed out after {timeout_s}s.")
@@ -180,6 +276,7 @@ class DBotEngine:
     def record_trade_csv(
         self,
         contract_id: int,
+        contract_type: str,
         stake: float,
         payout: float,
         profit: float,
@@ -202,7 +299,7 @@ class DBotEngine:
                 writer.writerow([
                     datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                     self.symbol,
-                    self.contract_type,
+                    contract_type,
                     contract_id,
                     round(stake, 2),
                     round(payout, 2),
@@ -218,15 +315,14 @@ class DBotEngine:
 
     async def execute_trade_cycle(self) -> bool:
         """
-        Execute a single DBot trade cycle:
-          1. Check circuit breakers (TP, SL, Max Loss Streak).
-          2. Sizing clamp to max_stake.
-          3. Get proposal.
-          4. Execute buy.
-          5. Await settlement.
-          6. Apply Martingale progression / reset.
-        Returns:
-          True if trading should continue, False if halted by circuit breaker.
+        Execute an institutional DBot trade cycle:
+          1. Circuit breaker checks (TP, SL, Max Loss Streak).
+          2. Dynamic direction & micro-momentum evaluation (PUT vs CALL).
+          3. Sizing clamp to max_stake ceiling.
+          4. Get proposal & buy contract.
+          5. Real-time streaming settlement.
+          6. Martingale scaling or win reset.
+          7. Atomic session persistence.
         """
         # Circuit Breaker 1: Take Profit Target Hit
         if self.session_pnl >= self.take_profit_usd:
@@ -234,6 +330,7 @@ class DBotEngine:
                 f"🎯 [TAKE PROFIT REACHED] Session target of +${self.take_profit_usd:.2f} achieved! "
                 f"Current Session P&L: +${self.session_pnl:.2f}. Halting bot."
             )
+            self._save_current_state(status="TP_HIT")
             return False
 
         # Circuit Breaker 2: Stop Loss Limit Hit
@@ -242,6 +339,7 @@ class DBotEngine:
                 f"🛑 [STOP LOSS TRIGGERED] Maximum session drawdown of -${self.stop_loss_usd:.2f} reached! "
                 f"Current Session P&L: ${self.session_pnl:.2f}. Halting bot to preserve capital."
             )
+            self._save_current_state(status="SL_HIT")
             return False
 
         # Circuit Breaker 3: Max Loss Streak Reached
@@ -251,6 +349,7 @@ class DBotEngine:
                     f"⚠️ [CIRCUIT BREAKER] Max consecutive loss streak of {self.max_loss_streak} reached! "
                     f"Halting bot to prevent Martingale drawdown bleed."
                 )
+                self._save_current_state(status="MAX_STREAK_HALT")
                 return False
             else:
                 log.warning(
@@ -259,29 +358,40 @@ class DBotEngine:
                 )
                 self.current_stake = self.base_stake
                 self.consecutive_losses = 0
+                self._save_current_state(status="RUNNING")
+
+        # Dynamic Direction Determination
+        chosen_dir, conviction, rationale = await determine_contract_direction(
+            symbol=self.symbol,
+            direction_mode=self.direction_mode,
+            preferred_default=self.contract_type,
+            consecutive_losses=self.consecutive_losses,
+        )
 
         # Enforce max stake ceiling
         stake_to_use = min(round(self.current_stake, 2), self.max_stake)
 
-        # Check account balance sufficiency
+        # Pre-execution balance sufficiency check
         current_bal = await self.refresh_balance()
         if current_bal < stake_to_use:
             log.error(
                 f"🛑 Insufficient account balance (${current_bal:.2f}) for next stake (${stake_to_use:.2f}). "
                 f"Trading halted."
             )
+            self._save_current_state(status="INSUFFICIENT_FUNDS")
             return False
 
         self.total_trades += 1
         trade_num = self.total_trades
 
         log.info(
-            f"─── Trade #{trade_num} | Sizing: ${stake_to_use:.2f} on {self.symbol} "
-            f"({self.duration}t {self.contract_type}) | Losses: {self.consecutive_losses} ───"
+            f"─── Trade #{trade_num} | Sizing: ${stake_to_use:.2f} | "
+            f"Direction: {chosen_dir} ({conviction*100:.0f}% conv) | Streak: {self.consecutive_losses}L ───"
         )
+        log.info(f"    Edge Rationale: {rationale}")
 
         # 1. Obtain Proposal
-        proposal = await self.get_proposal(stake_to_use)
+        proposal = await self.get_proposal(stake_to_use, contract_type=chosen_dir)
         if not proposal:
             log.error("Unable to obtain valid Deriv price proposal. Waiting before retry...")
             await asyncio.sleep(3.0)
@@ -300,11 +410,11 @@ class DBotEngine:
 
         contract_id = int(buy_data["contract_id"])
         log.info(
-            f"Contract #{contract_id} OPEN | Stake: ${ask_price:.2f} | "
-            f"Expected Payout: ${expected_payout:.2f} | Awaiting {self.duration} ticks..."
+            f"Contract #{contract_id} OPEN | {chosen_dir} | Stake: ${ask_price:.2f} | "
+            f"Expected Payout: ${expected_payout:.2f} | Streaming settlement..."
         )
 
-        # 3. Wait for Settlement
+        # 3. Real-Time Streaming Settlement
         poc = await self.wait_for_settlement(contract_id)
         if not poc:
             log.warning(f"Could not confirm settlement for contract #{contract_id}. Fetching updated balance...")
@@ -350,8 +460,11 @@ class DBotEngine:
                 f"Next Stake (x{self.martingale_multiplier:.1f}): ${self.current_stake:.2f} (Streak: {self.consecutive_losses})"
             )
 
+        self._save_current_state(status="RUNNING")
+
         self.record_trade_csv(
             contract_id=contract_id,
+            contract_type=chosen_dir,
             stake=ask_price,
             payout=payout,
             profit=profit,
@@ -363,13 +476,20 @@ class DBotEngine:
         return True
 
     async def run(self):
-        """Main DBot trading loop."""
+        """Main DBot trading loop with crash-resilient persistence."""
         self.is_running = True
         self.log_header()
 
         api = await self._ensure_connection()
         start_bal = await self.refresh_balance()
         log.info(f"Authorized on Account {api.loginid} | Starting Balance: ${start_bal:.2f} {api.currency}")
+
+        if self.session_status in ("TP_HIT", "SL_HIT", "MAX_STREAK_HALT"):
+            log.warning(
+                f"⚠️ Today's session was already finalized with status: '{self.session_status}' "
+                f"(PnL: ${self.session_pnl:+.2f}). Halting execution to prevent over-trading."
+            )
+            return
 
         try:
             while self.is_running:
@@ -388,12 +508,13 @@ class DBotEngine:
             final_bal = await self.refresh_balance()
             win_rate = (self.total_wins / self.total_trades * 100) if self.total_trades > 0 else 0.0
             log.info("=" * 80)
-            log.info("   DBOT SESSION FINISHED")
+            log.info("   DBOT SESSION SUMMARY")
             log.info("=" * 80)
             log.info(f"   Total Trades Taken  : {self.total_trades}")
             log.info(f"   Wins / Losses       : {self.total_wins} W / {self.total_losses} L (Win Rate: {win_rate:.1f}%)")
             log.info(f"   Net Session Profit  : ${self.session_pnl:+.2f} USD")
             log.info(f"   Final Balance       : ${final_bal:.2f} USD")
+            log.info(f"   Final Status        : {self.session_status}")
             log.info("=" * 80)
 
     def stop(self):

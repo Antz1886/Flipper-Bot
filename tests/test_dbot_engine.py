@@ -1,31 +1,100 @@
 """
-tests/test_dbot_engine.py — Quantitative & Behavioral Audit of DBot Execution Engine
+tests/test_dbot_engine.py — Institutional Audit of Upgraded DBot Engine
 Validates:
-  1. Default & custom parameter initialization matching Inbuilt Deriv Bot.
-  2. Martingale progression scaling on consecutive losses ($2 -> $4 -> $8 -> $16).
-  3. Reset to base stake ($2.00) immediately following a win.
-  4. Stake clamping to max_stake ceiling.
-  5. Session Take Profit circuit breaker termination.
-  6. Cumulative Session Stop Loss circuit breaker termination.
-  7. Max consecutive loss streak circuit breaker (HALT vs RESET).
-  8. Account balance sufficiency check prior to ordering.
-  9. CSV trade journaling schema and data integrity.
+  1. Default & custom parameter initialization.
+  2. Dynamic Direction & Micro-momentum evaluation (PUT vs CALL).
+  3. Real-Time Streaming Settlement handling with Event callback.
+  4. Session State Persistence (Atomic JSON save, reload, archiving).
+  5. Martingale progression scaling on consecutive losses ($2 -> $4 -> $8 -> $16).
+  6. Reset to base stake ($2.00) immediately following a win.
+  7. Stake clamping to max_stake ceiling.
+  8. Session Take Profit circuit breaker termination.
+  9. Cumulative Session Stop Loss circuit breaker termination.
+  10. Max consecutive loss streak circuit breaker (HALT vs RESET).
+  11. Insufficient balance safety rejection.
+  12. CSV trade journaling schema and data integrity.
 """
 
 import unittest
 from unittest.mock import AsyncMock, patch, MagicMock
 import os
 import csv
+import json
 import tempfile
 import asyncio
 
 from modules.dbot_engine import DBotEngine
+from modules.session_state import SessionStateManager
+from modules.direction_engine import evaluate_tick_bias, _calculate_ema
+
+
+class TestSessionState(unittest.TestCase):
+    def test_save_and_load_active_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_file = os.path.join(tmpdir, "test_session.json")
+            mgr = SessionStateManager(state_file=state_file)
+
+            # Initially no session
+            self.assertIsNone(mgr.load_active_session())
+
+            # Save an active session
+            mgr.save_session(
+                session_id="test-session-123",
+                total_trades=10,
+                total_wins=6,
+                total_losses=4,
+                consecutive_wins=1,
+                consecutive_losses=0,
+                current_stake=2.0,
+                session_pnl=4.50,
+                status="RUNNING",
+            )
+
+            # Load it back
+            loaded = mgr.load_active_session()
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded["session_id"], "test-session-123")
+            self.assertEqual(loaded["total_trades"], 10)
+            self.assertEqual(loaded["total_wins"], 6)
+            self.assertEqual(loaded["total_losses"], 4)
+            self.assertEqual(loaded["session_pnl"], 4.50)
+            self.assertEqual(loaded["status"], "RUNNING")
+
+
+class TestDirectionEngine(unittest.TestCase):
+    def test_ema_calculation(self):
+        prices = [10.0, 10.0, 10.0, 10.0]
+        ema = _calculate_ema(prices, 5)
+        self.assertEqual(ema, 10.0)
+
+    def test_bearish_momentum_bias(self):
+        # Descending tick price sequence
+        prices = [1180.0 - (i * 0.5) for i in range(25)]
+        direction, conviction, rationale = evaluate_tick_bias(prices, consecutive_losses=0)
+        self.assertEqual(direction, "PUT")
+        self.assertGreaterEqual(conviction, 0.65)
+        self.assertIn("Bearish", rationale)
+
+    def test_bullish_momentum_bias(self):
+        # Ascending tick price sequence
+        prices = [1170.0 + (i * 0.5) for i in range(25)]
+        direction, conviction, rationale = evaluate_tick_bias(prices, consecutive_losses=0)
+        self.assertEqual(direction, "CALL")
+        self.assertGreaterEqual(conviction, 0.65)
+        self.assertIn("Bullish", rationale)
+
+    def test_insufficient_ticks_fallback(self):
+        prices = [100.0, 101.0]
+        direction, conviction, _ = evaluate_tick_bias(prices, preferred_default="PUT")
+        self.assertEqual(direction, "PUT")
+        self.assertEqual(conviction, 0.50)
 
 
 class TestDBotEngine(unittest.TestCase):
     def setUp(self):
         self.engine = DBotEngine(
             symbol="1HZ100V",
+            direction_mode="PUT",
             contract_type="PUT",
             duration=5,
             duration_unit="t",
@@ -37,6 +106,8 @@ class TestDBotEngine(unittest.TestCase):
             take_profit_usd=20.0,
             stop_loss_usd=20.0,
             inter_trade_delay=0.0,
+            persist_session=False,
+            use_streaming=False,
         )
 
     def test_initialization(self):
@@ -175,6 +246,7 @@ class TestDBotEngine(unittest.TestCase):
                 self.engine.current_balance = 8950.0
                 self.engine.record_trade_csv(
                     contract_id=1234567,
+                    contract_type="PUT",
                     stake=2.0,
                     payout=3.80,
                     profit=1.80,

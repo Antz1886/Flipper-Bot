@@ -35,6 +35,7 @@ class DerivAPI:
         self._pending: dict[int, asyncio.Future] = {}
         self._tick_handlers: list[Callable] = []
         self._transaction_handlers: list[Callable] = []
+        self._contract_handlers: list[Callable] = []
         self._recv_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
         self._balance_event: asyncio.Event | None = None
@@ -147,6 +148,11 @@ class DerivAPI:
                     tx = msg.get("transaction", {})
                     for cb in self._transaction_handlers:
                         asyncio.create_task(cb(tx))
+
+                elif msg_type == "proposal_open_contract":
+                    poc = msg.get("proposal_open_contract", {})
+                    for cb in self._contract_handlers:
+                        asyncio.create_task(cb(poc))
 
         except websockets.exceptions.ConnectionClosed as e:
             log.warning(f"WebSocket connection closed: {e}")
@@ -396,6 +402,14 @@ class DerivAPI:
                 self._pending.pop(rid)
             self.connection_healthy = False
             return False
+
+    def add_contract_handler(self, cb: Callable):
+        if cb not in self._contract_handlers:
+            self._contract_handlers.append(cb)
+
+    def remove_contract_handler(self, cb: Callable):
+        if cb in self._contract_handlers:
+            self._contract_handlers.remove(cb)
 
     async def disconnect(self):
         """Gracefully close the WebSocket connection."""

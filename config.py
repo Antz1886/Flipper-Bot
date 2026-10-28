@@ -147,7 +147,8 @@ BOT_MODE                    = os.getenv("BOT_MODE", "DBOT").upper()
 
 # ─── Deriv Bot (DBot) Execution Engine Configuration ──────────────────────────
 DBOT_SYMBOL                 = os.getenv("DBOT_SYMBOL", "1HZ100V")
-DBOT_CONTRACT_TYPE          = os.getenv("DBOT_CONTRACT_TYPE", "PUT").upper()     # "PUT" (Fall) or "CALL" (Rise)
+DBOT_DIRECTION_MODE         = os.getenv("DBOT_DIRECTION_MODE", "DYNAMIC").upper() # "DYNAMIC", "TREND_FOLLOW", "PUT", "CALL"
+DBOT_CONTRACT_TYPE          = os.getenv("DBOT_CONTRACT_TYPE", "PUT").upper()     # Baseline fallback: "PUT" (Fall) or "CALL" (Rise)
 DBOT_DURATION               = int(os.getenv("DBOT_DURATION", "5"))               # 5 ticks
 DBOT_DURATION_UNIT          = os.getenv("DBOT_DURATION_UNIT", "t")               # "t" for ticks
 DBOT_BASE_STAKE             = float(os.getenv("DBOT_BASE_STAKE", "2.0"))         # Base stake ($2.00)
@@ -158,6 +159,8 @@ DBOT_MAX_STAKE              = float(os.getenv("DBOT_MAX_STAKE", "64.0"))        
 DBOT_TAKE_PROFIT_USD        = float(os.getenv("DBOT_TAKE_PROFIT_USD", "50.0"))    # Take profit target ($50.00)
 DBOT_STOP_LOSS_USD          = float(os.getenv("DBOT_STOP_LOSS_USD", "50.0"))      # Cumulative stop loss threshold ($50.00)
 DBOT_INTER_TRADE_DELAY_S    = float(os.getenv("DBOT_INTER_TRADE_DELAY_S", "1.0")) # Delay in seconds between trades
+DBOT_PERSIST_SESSION        = os.getenv("DBOT_PERSIST_SESSION", "true").lower() == "true" # Resilient session persistence on disk
+DBOT_USE_STREAMING          = os.getenv("DBOT_USE_STREAMING", "true").lower() == "true"   # Real-time WebSocket streaming settlement
 
 SCAN_INTERVAL_S = 15     # Scan cycle interval in seconds
 MAX_RETRIES     = 3
