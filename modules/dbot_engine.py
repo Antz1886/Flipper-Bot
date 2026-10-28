@@ -74,7 +74,14 @@ class DBotEngine:
         self.is_running: bool = False
 
         self.state_mgr = SessionStateManager()
-        if self.persist_session:
+        reset_requested = (
+            "--reset-session" in sys.argv
+            or os.getenv("DBOT_RESET_SESSION", "false").lower() == "true"
+        )
+        if reset_requested:
+            log.info("🔄 [SESSION RESET] Reset requested by user. Starting fresh session.")
+            self.state_mgr.clear()
+        elif self.persist_session:
             self._restore_persisted_state()
 
     def _restore_persisted_state(self):
@@ -425,8 +432,13 @@ class DBotEngine:
         status = str(poc.get("status", "lost")).lower()
         profit = float(poc.get("profit", -ask_price))
         payout = float(poc.get("payout", 0.0))
-        entry_spot = poc.get("entry_spot", "N/A")
-        exit_tick = poc.get("exit_tick", "N/A")
+        entry_spot = poc.get("entry_spot_display_value") or poc.get("entry_spot", "N/A")
+        exit_tick = (
+            poc.get("exit_tick_display_value")
+            or poc.get("exit_tick")
+            or poc.get("current_spot_display_value")
+            or poc.get("current_spot", "N/A")
+        )
 
         self.session_pnl += profit
         await self.refresh_balance()
