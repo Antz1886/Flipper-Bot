@@ -109,6 +109,16 @@ class SessionStateManager:
         except Exception as e:
             log.warning(f"Failed to archive session: {e}")
 
+    def archive_active_file(self):
+        """Archives current active session file to archive directory."""
+        try:
+            if os.path.exists(self.state_file):
+                with open(self.state_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.archive_session(data)
+        except Exception as e:
+            log.warning(f"Failed to archive active state file: {e}")
+
     def clear(self):
         """Clear active session file."""
         try:

@@ -108,6 +108,7 @@ class TestDBotEngine(unittest.TestCase):
             inter_trade_delay=0.0,
             persist_session=False,
             use_streaming=False,
+            continuous_mode=False,
         )
 
     def test_initialization(self):
@@ -185,6 +186,15 @@ class TestDBotEngine(unittest.TestCase):
         self.engine.session_pnl = 20.50  # Over target of $20.00
         should_continue = asyncio.run(self.engine.execute_trade_cycle())
         self.assertFalse(should_continue)
+
+    def test_continuous_mode_rollover(self):
+        self.engine.continuous_mode = True
+        self.engine.session_pnl = 20.50  # Over TP target of 20.0
+        should_continue = asyncio.run(self.engine.execute_trade_cycle())
+        self.assertTrue(should_continue)
+        self.assertEqual(self.engine.cycle_count, 2)
+        self.assertEqual(self.engine.session_pnl, 0.0)
+        self.assertEqual(self.engine.current_stake, 2.0)
 
     def test_stop_loss_circuit_breaker(self):
         self.engine.session_pnl = -21.00  # Beyond max loss of -$20.00

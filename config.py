@@ -161,6 +161,7 @@ DBOT_STOP_LOSS_USD          = float(os.getenv("DBOT_STOP_LOSS_USD", "50.0"))    
 DBOT_INTER_TRADE_DELAY_S    = float(os.getenv("DBOT_INTER_TRADE_DELAY_S", "1.0")) # Delay in seconds between trades
 DBOT_PERSIST_SESSION        = os.getenv("DBOT_PERSIST_SESSION", "true").lower() == "true" # Resilient session persistence on disk
 DBOT_USE_STREAMING          = os.getenv("DBOT_USE_STREAMING", "true").lower() == "true"   # Real-time WebSocket streaming settlement
+DBOT_CONTINUOUS_MODE        = os.getenv("DBOT_CONTINUOUS_MODE", "true").lower() == "true" # Keep running continuously across cycles for demo testing
 
 SCAN_INTERVAL_S = 15     # Scan cycle interval in seconds
 MAX_RETRIES     = 3

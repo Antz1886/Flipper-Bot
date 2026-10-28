@@ -42,6 +42,7 @@ class DBotEngine:
         inter_trade_delay: float = getattr(config, "DBOT_INTER_TRADE_DELAY_S", 1.0),
         persist_session: bool = getattr(config, "DBOT_PERSIST_SESSION", True),
         use_streaming: bool = getattr(config, "DBOT_USE_STREAMING", True),
+        continuous_mode: bool = getattr(config, "DBOT_CONTINUOUS_MODE", True),
     ):
         self.symbol = symbol
         self.direction_mode = direction_mode.upper()
@@ -58,6 +59,8 @@ class DBotEngine:
         self.inter_trade_delay = float(inter_trade_delay)
         self.persist_session = persist_session
         self.use_streaming = use_streaming
+        self.continuous_mode = continuous_mode
+        self.cycle_count: int = 1
 
         self.session_id: str = uuid.uuid4().hex[:12]
         self.current_stake: float = self.base_stake
@@ -132,6 +135,7 @@ class DBotEngine:
         log.info(f"   Streaming Execution : {'Real-Time WebSocket' if self.use_streaming else 'Polling (0.8s)'}")
         log.info(f"   Session Persistence : {'Active (data/dbot_session.json)' if self.persist_session else 'Disabled'}")
         log.info(f"   Inter-Trade Delay   : {self.inter_trade_delay}s")
+        log.info(f"   Execution Mode      : {'Continuous Testing (Auto-Roll Cycles)' if self.continuous_mode else 'Standard Session (Halts on Target)'}")
         log.info(f"   Account Mode        : {'DEMO' if getattr(config, 'DEMO_MODE', True) else 'REAL'}")
         log.info("=" * 80)
 
@@ -332,26 +336,73 @@ class DBotEngine:
           7. Atomic session persistence.
         """
         # Circuit Breaker 1: Take Profit Target Hit
-        if self.session_pnl >= self.take_profit_usd:
-            log.info(
-                f"🎯 [TAKE PROFIT REACHED] Session target of +${self.take_profit_usd:.2f} achieved! "
-                f"Current Session P&L: +${self.session_pnl:.2f}. Halting bot."
-            )
-            self._save_current_state(status="TP_HIT")
-            return False
+        if self.session_pnl >= self.take_profit_usd and self.take_profit_usd > 0:
+            if self.continuous_mode:
+                log.info("=" * 80)
+                log.info(
+                    f"🎉 [CYCLE #{self.cycle_count} COMPLETE: +${self.session_pnl:.2f} USD] "
+                    f"Target reached! (Wins: {self.total_wins}/{self.total_trades}). "
+                    f"Archiving cycle and rolling over to Cycle #{self.cycle_count + 1}..."
+                )
+                log.info("=" * 80)
+                self._save_current_state(status="TP_HIT")
+                self.state_mgr.archive_active_file()
+                self.cycle_count += 1
+                self.total_trades = 0
+                self.total_wins = 0
+                self.total_losses = 0
+                self.consecutive_wins = 0
+                self.consecutive_losses = 0
+                self.current_stake = self.base_stake
+                self.session_pnl = 0.0
+                self.session_status = "RUNNING"
+                self.session_id = uuid.uuid4().hex[:12]
+                self._save_current_state(status="RUNNING")
+                await asyncio.sleep(2.0)
+                return True
+            else:
+                log.info(
+                    f"🎯 [TAKE PROFIT REACHED] Session target of +${self.take_profit_usd:.2f} achieved! "
+                    f"Current Session P&L: +${self.session_pnl:.2f}. Halting bot."
+                )
+                self._save_current_state(status="TP_HIT")
+                return False
 
         # Circuit Breaker 2: Stop Loss Limit Hit
-        if self.session_pnl <= -self.stop_loss_usd:
-            log.error(
-                f"🛑 [STOP LOSS TRIGGERED] Maximum session drawdown of -${self.stop_loss_usd:.2f} reached! "
-                f"Current Session P&L: ${self.session_pnl:.2f}. Halting bot to preserve capital."
-            )
-            self._save_current_state(status="SL_HIT")
-            return False
+        if self.session_pnl <= -self.stop_loss_usd and self.stop_loss_usd > 0:
+            if self.continuous_mode:
+                log.warning("=" * 80)
+                log.warning(
+                    f"🛑 [CYCLE #{self.cycle_count} DRAWDOWN: ${self.session_pnl:.2f} USD] "
+                    f"Resetting stake to base (${self.base_stake:.2f}) and pausing 30s before Cycle #{self.cycle_count + 1}..."
+                )
+                log.warning("=" * 80)
+                self._save_current_state(status="SL_HIT")
+                self.state_mgr.archive_active_file()
+                self.cycle_count += 1
+                self.total_trades = 0
+                self.total_wins = 0
+                self.total_losses = 0
+                self.consecutive_wins = 0
+                self.consecutive_losses = 0
+                self.current_stake = self.base_stake
+                self.session_pnl = 0.0
+                self.session_status = "RUNNING"
+                self.session_id = uuid.uuid4().hex[:12]
+                self._save_current_state(status="RUNNING")
+                await asyncio.sleep(30.0)
+                return True
+            else:
+                log.error(
+                    f"🛑 [STOP LOSS TRIGGERED] Maximum session drawdown of -${self.stop_loss_usd:.2f} reached! "
+                    f"Current Session P&L: ${self.session_pnl:.2f}. Halting bot to preserve capital."
+                )
+                self._save_current_state(status="SL_HIT")
+                return False
 
         # Circuit Breaker 3: Max Loss Streak Reached
         if self.consecutive_losses >= self.max_loss_streak:
-            if self.action_on_max_loss == "HALT":
+            if self.action_on_max_loss == "HALT" and not self.continuous_mode:
                 log.error(
                     f"⚠️ [CIRCUIT BREAKER] Max consecutive loss streak of {self.max_loss_streak} reached! "
                     f"Halting bot to prevent Martingale drawdown bleed."
@@ -360,7 +411,7 @@ class DBotEngine:
                 return False
             else:
                 log.warning(
-                    f"⚠️ Max consecutive loss streak of {self.max_loss_streak} reached. "
+                    f"⚠️ [STREAK RECOVERY] Max consecutive loss streak of {self.max_loss_streak} reached. "
                     f"Resetting stake to base stake (${self.base_stake:.2f})."
                 )
                 self.current_stake = self.base_stake
@@ -497,11 +548,29 @@ class DBotEngine:
         log.info(f"Authorized on Account {api.loginid} | Starting Balance: ${start_bal:.2f} {api.currency}")
 
         if self.session_status in ("TP_HIT", "SL_HIT", "MAX_STREAK_HALT"):
-            log.warning(
-                f"⚠️ Today's session was already finalized with status: '{self.session_status}' "
-                f"(PnL: ${self.session_pnl:+.2f}). Halting execution to prevent over-trading."
-            )
-            return
+            if self.continuous_mode:
+                log.info(
+                    f"🔄 [CONTINUOUS MODE] Previous cycle completed with status: '{self.session_status}' "
+                    f"(Cycle P&L: ${self.session_pnl:+.2f}). Archiving cycle and rolling into new cycle for forward-testing..."
+                )
+                self.state_mgr.archive_active_file()
+                self.cycle_count += 1
+                self.total_trades = 0
+                self.total_wins = 0
+                self.total_losses = 0
+                self.consecutive_wins = 0
+                self.consecutive_losses = 0
+                self.current_stake = self.base_stake
+                self.session_pnl = 0.0
+                self.session_status = "RUNNING"
+                self.session_id = uuid.uuid4().hex[:12]
+                self._save_current_state(status="RUNNING")
+            else:
+                log.warning(
+                    f"⚠️ Today's session was already finalized with status: '{self.session_status}' "
+                    f"(PnL: ${self.session_pnl:+.2f}). Halting execution to prevent over-trading."
+                )
+                return
 
         try:
             while self.is_running:
