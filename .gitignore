@@ -12,3 +12,4 @@ logs/
 bot.pid
 data/
 scratch/
+scripts/

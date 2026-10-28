@@ -60,6 +60,7 @@ from modules.trade_learner import (
     TradeContext,
     get_session_phase,
 )
+from modules.dbot_engine import DBotEngine
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -97,7 +98,7 @@ def log_trade(symbol, side, entry_price, stake, stop_loss_usd, take_profit_usd, 
         log.error(f"Failed to log trade to CSV: {e}")
 
 
-async def main():
+async def run_smc():
     log.info("=" * 80)
     log.info("   CONTI INSTITUTIONAL SMC BOT — QUANT EDITION (SELF-HEALING & LEARNING)")
     log.info("=" * 80)
@@ -356,6 +357,41 @@ async def main():
         log.error(f"Unexpected error in main loop: {e}", exc_info=True)
     finally:
         await connector.shutdown()
+
+
+async def run_dbot():
+    """Runs the Inbuilt Deriv Bot (DBot) continuous execution engine."""
+    success = await connector.initialize()
+    if not success:
+        log.error("Failed to connect or authorize with Deriv API for DBot execution.")
+        return
+
+    if "--dry-run" in sys.argv:
+        log.info("🧪 [DRY RUN] DBot engine initialized and connection verified successfully. Exiting.")
+        await connector.shutdown()
+        return
+
+    engine = DBotEngine()
+    try:
+        await engine.run()
+    except KeyboardInterrupt:
+        log.info("DBot shutdown requested by user.")
+    except Exception as e:
+        log.error(f"Unexpected error in DBot session: {e}", exc_info=True)
+    finally:
+        await connector.shutdown()
+
+
+async def main():
+    mode = getattr(config, "BOT_MODE", "DBOT").upper()
+    log.info(f"⚡ Bootstrapping Flipper-Bot in [{mode}] Mode...")
+    if mode == "DBOT":
+        await run_dbot()
+    elif mode in ("SMC", "SMC_MULTIPLIER", "MULTIPLIER"):
+        await run_smc()
+    else:
+        log.warning(f"Unknown BOT_MODE '{mode}'. Defaulting to DBOT.")
+        await run_dbot()
 
 
 if __name__ == "__main__":

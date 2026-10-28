@@ -141,6 +141,24 @@ VIRTUAL_EQUITY     = float(os.getenv("VIRTUAL_EQUITY", "0.0") or "0.0")
 FIXED_STAKE_USD    = float(os.getenv("FIXED_STAKE_USD", "0.0") or "0.0")
 
 # ─── System & Execution Settings ──────────────────────────────────────────────
+# BOT_MODE: "DBOT" for 5-tick Binary Options (matches inbuilt Deriv Bot)
+#           "SMC_MULTIPLIER" for Institutional Multipliers Framework
+BOT_MODE                    = os.getenv("BOT_MODE", "DBOT").upper()
+
+# ─── Deriv Bot (DBot) Execution Engine Configuration ──────────────────────────
+DBOT_SYMBOL                 = os.getenv("DBOT_SYMBOL", "1HZ100V")
+DBOT_CONTRACT_TYPE          = os.getenv("DBOT_CONTRACT_TYPE", "PUT").upper()     # "PUT" (Fall) or "CALL" (Rise)
+DBOT_DURATION               = int(os.getenv("DBOT_DURATION", "5"))               # 5 ticks
+DBOT_DURATION_UNIT          = os.getenv("DBOT_DURATION_UNIT", "t")               # "t" for ticks
+DBOT_BASE_STAKE             = float(os.getenv("DBOT_BASE_STAKE", "2.0"))         # Base stake ($2.00)
+DBOT_MARTINGALE_MULTIPLIER  = float(os.getenv("DBOT_MARTINGALE_MULTIPLIER", "2.0")) # Multiplier on loss (2.0x)
+DBOT_MAX_LOSS_STREAK        = int(os.getenv("DBOT_MAX_LOSS_STREAK", "5"))        # Max consecutive losses before safety halt/reset
+DBOT_ACTION_ON_MAX_LOSS     = os.getenv("DBOT_ACTION_ON_MAX_LOSS", "HALT").upper() # "HALT" or "RESET"
+DBOT_MAX_STAKE              = float(os.getenv("DBOT_MAX_STAKE", "64.0"))         # Maximum allowable stake ceiling ($64.00)
+DBOT_TAKE_PROFIT_USD        = float(os.getenv("DBOT_TAKE_PROFIT_USD", "50.0"))    # Take profit target ($50.00)
+DBOT_STOP_LOSS_USD          = float(os.getenv("DBOT_STOP_LOSS_USD", "50.0"))      # Cumulative stop loss threshold ($50.00)
+DBOT_INTER_TRADE_DELAY_S    = float(os.getenv("DBOT_INTER_TRADE_DELAY_S", "1.0")) # Delay in seconds between trades
+
 SCAN_INTERVAL_S = 15     # Scan cycle interval in seconds
 MAX_RETRIES     = 3
 RETRY_DELAY_S   = 2
