@@ -1,10 +1,11 @@
 """
 modules/direction_engine.py — Micro-Structure & Dynamic Direction Engine
-Solves directional inelasticity on 5-tick Deriv options:
-  - Ingests real-time tick sequences from Deriv API.
-  - Computes Micro-EMA (Fast 5 vs Slow 15) and recent tick momentum delta.
-  - Dynamically assigns directional bias ("PUT" vs "CALL") with conviction scoring.
-  - Enforces streak-mitigation: increases required signal conviction after consecutive losses.
+Solves directional inelasticity and counter-trend drag on 5-tick Deriv options:
+  - Higher-Timeframe (HTF) M1 Trend Gating: Strictly aligns trades with M1 EMA21 vs EMA50 trend.
+    Prevents fighting the macroscopic momentum (eliminating counter-trend losses).
+  - Tick-Level RSI & Momentum Timing: Filters out local tops and bottoms.
+    Enters CALL on pullbacks in an uptrend; enters PUT on bounces in a downtrend.
+  - Streak-Mitigation: Raises conviction threshold after consecutive losses.
 """
 
 import logging
@@ -27,7 +28,33 @@ def _calculate_ema(values: list[float], period: int) -> float:
     return ema
 
 
-async def fetch_recent_ticks(symbol: str, count: int = 30) -> list[float]:
+def _calculate_rsi(prices: list[float], period: int = 14) -> float:
+    """Calculate Relative Strength Index (RSI) over numeric series."""
+    if len(prices) < period + 1:
+        return 50.0
+    gains = []
+    losses = []
+    for i in range(1, len(prices)):
+        delta = prices[i] - prices[i - 1]
+        if delta > 0:
+            gains.append(delta)
+            losses.append(0.0)
+        else:
+            gains.append(0.0)
+            losses.append(abs(delta))
+
+    recent_gains = gains[-period:]
+    recent_losses = losses[-period:]
+    avg_gain = sum(recent_gains) / period
+    avg_loss = sum(recent_losses) / period
+
+    if avg_loss == 0.0:
+        return 100.0 if avg_gain > 0 else 50.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+async def fetch_recent_ticks(symbol: str, count: int = 50) -> list[float]:
     """Fetch recent tick price sequence directly from Deriv WebSocket."""
     api = get_api()
     if not api or not api.is_active:
@@ -48,13 +75,58 @@ async def fetch_recent_ticks(symbol: str, count: int = 30) -> list[float]:
         return []
 
 
+async def fetch_htf_candles(symbol: str, count: int = 60, granularity: int = 60) -> list[dict]:
+    """Fetch higher-timeframe candles (default: M1 / 60s) for macroscopic trend gating."""
+    api = get_api()
+    if not api or not api.is_active:
+        return []
+
+    try:
+        resp = await api.send({
+            "ticks_history": symbol,
+            "end": "latest",
+            "count": count,
+            "granularity": granularity,
+            "style": "candles",
+        })
+        candles = resp.get("candles", [])
+        return candles
+    except Exception as e:
+        log.warning(f"Could not retrieve HTF candles for {symbol}: {e}")
+        return []
+
+
+def evaluate_htf_trend(candles: list[dict]) -> Tuple[str, float, float]:
+    """
+    Evaluates Higher-Timeframe trend from M1 candles using EMA21 and EMA50.
+    Returns:
+      (trend: 'BULLISH'|'BEARISH'|'NEUTRAL', ema21: float, ema50: float)
+    """
+    if len(candles) < 20:
+        return "NEUTRAL", 0.0, 0.0
+
+    closes = [float(c.get("close", 0.0)) for c in candles]
+    ema21 = _calculate_ema(closes, min(21, len(closes)))
+    ema50 = _calculate_ema(closes, min(50, len(closes)))
+    curr_close = closes[-1]
+
+    if ema21 > ema50 and curr_close >= ema50:
+        return "BULLISH", ema21, ema50
+    elif ema21 < ema50 and curr_close <= ema50:
+        return "BEARISH", ema21, ema50
+    else:
+        return "NEUTRAL", ema21, ema50
+
+
 def evaluate_tick_bias(
     prices: list[float],
     consecutive_losses: int = 0,
     preferred_default: str = "PUT",
+    htf_trend: str = "NEUTRAL",
+    tick_rsi: float = 50.0,
 ) -> Tuple[str, float, str]:
     """
-    Evaluates micro-trend, tick momentum, and mean-reversion exhaustion.
+    Evaluates micro-trend, tick momentum, HTF trend alignment, and RSI exhaustion.
     Returns:
       (direction: 'PUT'|'CALL', conviction: 0.0-1.0, rationale: str)
     """
@@ -75,16 +147,75 @@ def evaluate_tick_bias(
     down_ticks = sum(1 for d in tick_deltas if d < 0)
     up_ticks = sum(1 for d in tick_deltas if d > 0)
 
-    # 3. Pullback Reversal Setup vs Momentum Continuation
-    # Pullback to EMA: In a strong downtrend, 3 consecutive up ticks represent an exhaustion bounce into resistance
-    is_bearish_exhaustion = is_downtrend and up_ticks >= 2
-    # Momentum continuation: In downtrend, consecutive down ticks confirm impulse
-    is_bearish_impulse = is_downtrend and down_ticks >= 2
+    # If RSI not explicitly provided, calculate from price sequence
+    if tick_rsi == 50.0 and len(prices) >= 15:
+        tick_rsi = _calculate_rsi(prices, period=14)
 
+    # 3. Macro Trend Gating (M1 EMA Alignment)
+    if htf_trend == "BULLISH":
+        # In a bullish HTF trend: ONLY allow CALL options (ban counter-trend PUTs)
+        if tick_rsi > 75.0:
+            # Overbought top: do not buy at the top, wait for pullback
+            return (
+                "CALL",
+                0.45,
+                f"Bullish HTF (M1), but Tick RSI ({tick_rsi:.1f}) is overbought (>75). Waiting for dip.",
+            )
+        elif tick_rsi <= 55.0 and down_ticks >= 1:
+            # High-conviction pullback entry in an uptrend
+            return (
+                "CALL",
+                0.85,
+                f"Bullish HTF alignment + Dip pullback entry (RSI {tick_rsi:.1f}, {down_ticks} down ticks into support)",
+            )
+        elif is_uptrend or up_ticks >= 2:
+            return (
+                "CALL",
+                0.80,
+                f"Bullish HTF continuation (EMA5 > EMA15, RSI {tick_rsi:.1f})",
+            )
+        else:
+            return (
+                "CALL",
+                0.72,
+                f"Bullish HTF bias (RSI {tick_rsi:.1f})",
+            )
+
+    elif htf_trend == "BEARISH":
+        # In a bearish HTF trend: ONLY allow PUT options (ban counter-trend CALLs)
+        if tick_rsi < 25.0:
+            # Oversold bottom: do not short at the bottom, wait for bounce
+            return (
+                "PUT",
+                0.45,
+                f"Bearish HTF (M1), but Tick RSI ({tick_rsi:.1f}) is oversold (<25). Waiting for bounce.",
+            )
+        elif tick_rsi >= 45.0 and up_ticks >= 1:
+            # High-conviction bounce fade in a downtrend
+            return (
+                "PUT",
+                0.85,
+                f"Bearish HTF alignment + Bounce fade entry (RSI {tick_rsi:.1f}, {up_ticks} up ticks into resistance)",
+            )
+        elif is_downtrend or down_ticks >= 2:
+            return (
+                "PUT",
+                0.80,
+                f"Bearish HTF continuation (EMA5 < EMA15, RSI {tick_rsi:.1f})",
+            )
+        else:
+            return (
+                "PUT",
+                0.72,
+                f"Bearish HTF bias (RSI {tick_rsi:.1f})",
+            )
+
+    # 4. Fallback / Neutral HTF Mode (Direct micro-trend & RSI boundary evaluation)
+    is_bearish_exhaustion = is_downtrend and up_ticks >= 2
+    is_bearish_impulse = is_downtrend and down_ticks >= 2
     is_bullish_exhaustion = is_uptrend and down_ticks >= 2
     is_bullish_impulse = is_uptrend and up_ticks >= 2
 
-    # Scoring & Direction Assignment
     if is_bearish_exhaustion:
         direction = "PUT"
         conviction = 0.85
@@ -101,6 +232,14 @@ def evaluate_tick_bias(
         direction = "CALL"
         conviction = 0.80
         rationale = f"Bullish impulse continuation (EMA5 > EMA15, {up_ticks}/3 up ticks)"
+    elif tick_rsi < 30.0:
+        direction = "CALL"
+        conviction = 0.75
+        rationale = f"Oversold micro-mean-reversion bounce (RSI {tick_rsi:.1f} < 30)"
+    elif tick_rsi > 70.0:
+        direction = "PUT"
+        conviction = 0.75
+        rationale = f"Overbought micro-mean-reversion fade (RSI {tick_rsi:.1f} > 70)"
     elif is_downtrend:
         direction = "PUT"
         conviction = 0.65
@@ -110,10 +249,9 @@ def evaluate_tick_bias(
         conviction = 0.65
         rationale = "Bullish EMA alignment (EMA5 > EMA15)"
     else:
-        # Market in tight compression / consolidation
         direction = preferred_default
         conviction = 0.50
-        rationale = f"Compression/Range-bound ticks; defaulting to {preferred_default}"
+        rationale = f"Compression/Range-bound ticks (RSI {tick_rsi:.1f}); defaulting to {preferred_default}"
 
     # Streak Mitigation: Require higher conviction if in a loss streak
     if consecutive_losses >= 2 and conviction < 0.70:
@@ -134,7 +272,7 @@ async def determine_contract_direction(
     """
     Main entry point for DBot direction determination.
     Modes:
-      - 'DYNAMIC': Algorithmic selection between PUT and CALL based on ticks.
+      - 'DYNAMIC': Algorithmic selection between PUT and CALL based on HTF trend & ticks.
       - 'TREND_FOLLOW': Strictly follows EMA trend.
       - 'PUT': Fixed Fall option.
       - 'CALL': Fixed Rise option.
@@ -145,12 +283,28 @@ async def determine_contract_direction(
     if mode == "CALL":
         return "CALL", 1.0, "Static user configuration: CALL (Rise)"
 
-    ticks = await fetch_recent_ticks(symbol, count=30)
+    ticks = await fetch_recent_ticks(symbol, count=50)
     if not ticks:
         return preferred_default, 0.50, f"Tick feed unavailable; using fallback default {preferred_default}"
+
+    # Fetch Higher-Timeframe trend if enabled
+    htf_trend = "NEUTRAL"
+    if getattr(config, "DBOT_USE_HTF_FILTER", True):
+        candles = await fetch_htf_candles(
+            symbol,
+            count=60,
+            granularity=getattr(config, "DBOT_HTF_TIMEFRAME_S", 60),
+        )
+        if candles:
+            htf_trend, _, _ = evaluate_htf_trend(candles)
+
+    # Compute Tick RSI
+    tick_rsi = _calculate_rsi(ticks, period=getattr(config, "DBOT_RSI_PERIOD", 14))
 
     return evaluate_tick_bias(
         prices=ticks,
         consecutive_losses=consecutive_losses,
         preferred_default=preferred_default,
+        htf_trend=htf_trend,
+        tick_rsi=tick_rsi,
     )

@@ -32,14 +32,17 @@ class DBotEngine:
         contract_type: str = getattr(config, "DBOT_CONTRACT_TYPE", "PUT"),
         duration: int = getattr(config, "DBOT_DURATION", 5),
         duration_unit: str = getattr(config, "DBOT_DURATION_UNIT", "t"),
+        staking_strategy: str = getattr(config, "DBOT_STAKING_STRATEGY", "DALEMBERT"),
         base_stake: float = getattr(config, "DBOT_BASE_STAKE", 2.0),
+        dalembert_unit: float = getattr(config, "DBOT_DALEMBERT_UNIT", 1.0),
         martingale_multiplier: float = getattr(config, "DBOT_MARTINGALE_MULTIPLIER", 2.0),
         max_loss_streak: int = getattr(config, "DBOT_MAX_LOSS_STREAK", 5),
         action_on_max_loss: str = getattr(config, "DBOT_ACTION_ON_MAX_LOSS", "HALT"),
-        max_stake: float = getattr(config, "DBOT_MAX_STAKE", 64.0),
+        max_stake: float = getattr(config, "DBOT_MAX_STAKE", 8.0),
         take_profit_usd: float = getattr(config, "DBOT_TAKE_PROFIT_USD", 50.0),
         stop_loss_usd: float = getattr(config, "DBOT_STOP_LOSS_USD", 50.0),
-        inter_trade_delay: float = getattr(config, "DBOT_INTER_TRADE_DELAY_S", 1.0),
+        inter_trade_delay: float = getattr(config, "DBOT_INTER_TRADE_DELAY_S", 15.0),
+        min_conviction: float = getattr(config, "DBOT_MIN_CONVICTION", 0.70),
         persist_session: bool = getattr(config, "DBOT_PERSIST_SESSION", True),
         use_streaming: bool = getattr(config, "DBOT_USE_STREAMING", True),
         continuous_mode: bool = getattr(config, "DBOT_CONTINUOUS_MODE", True),
@@ -49,7 +52,9 @@ class DBotEngine:
         self.contract_type = contract_type.upper()
         self.duration = duration
         self.duration_unit = duration_unit
+        self.staking_strategy = staking_strategy.upper()
         self.base_stake = float(base_stake)
+        self.dalembert_unit = float(dalembert_unit)
         self.martingale_multiplier = float(martingale_multiplier)
         self.max_loss_streak = int(max_loss_streak)
         self.action_on_max_loss = action_on_max_loss.upper()
@@ -57,6 +62,7 @@ class DBotEngine:
         self.take_profit_usd = float(take_profit_usd)
         self.stop_loss_usd = float(stop_loss_usd)
         self.inter_trade_delay = float(inter_trade_delay)
+        self.min_conviction = float(min_conviction)
         self.persist_session = persist_session
         self.use_streaming = use_streaming
         self.continuous_mode = continuous_mode
@@ -123,12 +129,17 @@ class DBotEngine:
         log.info("   INSTITUTIONAL DERIV BOT (DBOT) ENGINE — QUANT EDITION")
         log.info("=" * 80)
         log.info(f"   Asset Symbol        : {self.symbol}")
-        log.info(f"   Direction Mode      : {self.direction_mode} (Dynamic Tick Momentum)")
+        log.info(f"   Direction Mode      : {self.direction_mode} (Dynamic Tick Momentum + HTF M1 Filter)")
         log.info(f"   Default Contract    : {self.contract_type} ({'Fall' if self.contract_type == 'PUT' else 'Rise'})")
         log.info(f"   Duration            : {self.duration} {self.duration_unit} (ticks)")
+        log.info(f"   Staking Strategy    : {self.staking_strategy}")
         log.info(f"   Base Stake          : ${self.base_stake:.2f} USD")
-        log.info(f"   Martingale Ratio    : {self.martingale_multiplier:.1f}x (on loss)")
+        if self.staking_strategy == "DALEMBERT":
+            log.info(f"   D'Alembert Unit     : +${self.dalembert_unit:.2f} on loss / -${self.dalembert_unit:.2f} on win")
+        elif self.staking_strategy == "MARTINGALE":
+            log.info(f"   Martingale Ratio    : {self.martingale_multiplier:.1f}x (on loss)")
         log.info(f"   Max Stake Cap       : ${self.max_stake:.2f} USD")
+        log.info(f"   Min Conviction Gate : {self.min_conviction*100:.0f}%")
         log.info(f"   Max Loss Streak     : {self.max_loss_streak} (Action: {self.action_on_max_loss})")
         log.info(f"   Session Take Profit : +${self.take_profit_usd:.2f} USD")
         log.info(f"   Session Stop Loss   : -${self.stop_loss_usd:.2f} USD")
@@ -426,6 +437,14 @@ class DBotEngine:
             consecutive_losses=self.consecutive_losses,
         )
 
+        # Strict Entry Conviction Filter (Prevents churning low-probability noise)
+        if conviction < self.min_conviction:
+            log.info(
+                f"⏳ [FILTER VETO] Signal conviction ({conviction*100:.0f}%) < threshold ({self.min_conviction*100:.0f}%). "
+                f"Setup: {rationale}. Waiting for high-probability trigger..."
+            )
+            return True
+
         # Enforce max stake ceiling
         stake_to_use = min(round(self.current_stake, 2), self.max_stake)
 
@@ -443,7 +462,7 @@ class DBotEngine:
         trade_num = self.total_trades
 
         log.info(
-            f"─── Trade #{trade_num} | Sizing: ${stake_to_use:.2f} | "
+            f"─── Trade #{trade_num} | Sizing: ${stake_to_use:.2f} ({self.staking_strategy}) | "
             f"Direction: {chosen_dir} ({conviction*100:.0f}% conv) | Streak: {self.consecutive_losses}L ───"
         )
         log.info(f"    Edge Rationale: {rationale}")
@@ -500,27 +519,44 @@ class DBotEngine:
             self.total_wins += 1
             self.consecutive_wins += 1
             self.consecutive_losses = 0
-            self.current_stake = self.base_stake
+
+            if self.staking_strategy == "DALEMBERT":
+                # D'Alembert: decrease stake by 1 unit on win (floor: base_stake)
+                self.current_stake = max(round(self.current_stake - self.dalembert_unit, 2), self.base_stake)
+            elif self.staking_strategy == "FLAT":
+                self.current_stake = self.base_stake
+            else:
+                # Martingale: reset to base stake
+                self.current_stake = self.base_stake
 
             log.info(
                 f"✅ [WIN] #{trade_num} Contract #{contract_id} | Entry: {entry_spot} -> Exit: {exit_tick} | "
                 f"Profit: +${profit:.2f} | Session PnL: ${self.session_pnl:+.2f} "
                 f"(Wins: {self.total_wins}/{self.total_trades}, WR: {win_rate:.1f}%) | "
-                f"Reset Stake to ${self.current_stake:.2f}"
+                f"Next Stake ({self.staking_strategy}): ${self.current_stake:.2f}"
             )
         else:
             self.total_losses += 1
             self.consecutive_losses += 1
             self.consecutive_wins = 0
 
-            next_stake = round(stake_to_use * self.martingale_multiplier, 2)
-            self.current_stake = min(next_stake, self.max_stake)
+            if self.staking_strategy == "DALEMBERT":
+                # D'Alembert: increase stake by 1 unit on loss (ceiling: max_stake)
+                self.current_stake = min(round(self.current_stake + self.dalembert_unit, 2), self.max_stake)
+                sizing_desc = f"+${self.dalembert_unit:.2f}"
+            elif self.staking_strategy == "FLAT":
+                self.current_stake = self.base_stake
+                sizing_desc = "flat"
+            else:
+                next_stake = round(stake_to_use * self.martingale_multiplier, 2)
+                self.current_stake = min(next_stake, self.max_stake)
+                sizing_desc = f"x{self.martingale_multiplier:.1f}"
 
             log.info(
                 f"❌ [LOSS] #{trade_num} Contract #{contract_id} | Entry: {entry_spot} -> Exit: {exit_tick} | "
                 f"Loss: -${abs(profit):.2f} | Session PnL: ${self.session_pnl:+.2f} "
                 f"(Losses: {self.total_losses}/{self.total_trades}, WR: {win_rate:.1f}%) | "
-                f"Next Stake (x{self.martingale_multiplier:.1f}): ${self.current_stake:.2f} (Streak: {self.consecutive_losses})"
+                f"Next Stake ({sizing_desc}): ${self.current_stake:.2f} (Streak: {self.consecutive_losses})"
             )
 
         self._save_current_state(status="RUNNING")

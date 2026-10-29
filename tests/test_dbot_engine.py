@@ -25,7 +25,12 @@ import asyncio
 
 from modules.dbot_engine import DBotEngine
 from modules.session_state import SessionStateManager
-from modules.direction_engine import evaluate_tick_bias, _calculate_ema
+from modules.direction_engine import (
+    evaluate_tick_bias,
+    _calculate_ema,
+    _calculate_rsi,
+    evaluate_htf_trend,
+)
 
 
 class TestSessionState(unittest.TestCase):
@@ -98,6 +103,7 @@ class TestDBotEngine(unittest.TestCase):
             contract_type="PUT",
             duration=5,
             duration_unit="t",
+            staking_strategy="MARTINGALE",
             base_stake=2.0,
             martingale_multiplier=2.0,
             max_loss_streak=4,
@@ -106,6 +112,7 @@ class TestDBotEngine(unittest.TestCase):
             take_profit_usd=20.0,
             stop_loss_usd=20.0,
             inter_trade_delay=0.0,
+            min_conviction=0.50,
             persist_session=False,
             use_streaming=False,
             continuous_mode=False,
@@ -278,6 +285,120 @@ class TestDBotEngine(unittest.TestCase):
                     self.assertEqual(row[4], "2.0")
                     self.assertEqual(row[6], "1.8")
                     self.assertEqual(row[7], "WON")
+
+    @patch("modules.dbot_engine.DBotEngine.refresh_balance", new_callable=AsyncMock)
+    @patch("modules.dbot_engine.DBotEngine.get_proposal", new_callable=AsyncMock)
+    @patch("modules.dbot_engine.DBotEngine.buy_contract", new_callable=AsyncMock)
+    @patch("modules.dbot_engine.DBotEngine.wait_for_settlement", new_callable=AsyncMock)
+    def test_dalembert_loss_and_win_progression(self, mock_settle, mock_buy, mock_prop, mock_bal):
+        """Validates Step 2a: D'Alembert +1 unit on loss, -1 unit on win."""
+        dalembert_engine = DBotEngine(
+            staking_strategy="DALEMBERT",
+            base_stake=2.0,
+            dalembert_unit=1.0,
+            max_stake=8.0,
+            min_conviction=0.50,
+            direction_mode="PUT",
+            persist_session=False,
+            use_streaming=False,
+            continuous_mode=False,
+        )
+        mock_bal.return_value = 1000.0
+
+        # Loss 1: Stake $2.00 -> should increase by $1.00 to $3.00
+        mock_prop.return_value = {"id": "p1", "ask_price": 2.0, "payout": 3.8}
+        mock_buy.return_value = {"contract_id": 2001, "buy_price": 2.0}
+        mock_settle.return_value = {"status": "lost", "profit": -2.0, "entry_spot": 100.0, "exit_tick": 101.0}
+
+        asyncio.run(dalembert_engine.execute_trade_cycle())
+        self.assertEqual(dalembert_engine.current_stake, 3.0)
+
+        # Loss 2: Stake $3.00 -> should increase by $1.00 to $4.00
+        mock_prop.return_value = {"id": "p2", "ask_price": 3.0, "payout": 5.7}
+        mock_buy.return_value = {"contract_id": 2002, "buy_price": 3.0}
+        mock_settle.return_value = {"status": "lost", "profit": -3.0, "entry_spot": 100.0, "exit_tick": 101.0}
+
+        asyncio.run(dalembert_engine.execute_trade_cycle())
+        self.assertEqual(dalembert_engine.current_stake, 4.0)
+
+        # Win 1: Stake $4.00 -> should decrease by $1.00 to $3.00
+        mock_prop.return_value = {"id": "p3", "ask_price": 4.0, "payout": 7.6}
+        mock_buy.return_value = {"contract_id": 2003, "buy_price": 4.0}
+        mock_settle.return_value = {"status": "won", "profit": 3.6, "entry_spot": 100.0, "exit_tick": 99.0}
+
+        asyncio.run(dalembert_engine.execute_trade_cycle())
+        self.assertEqual(dalembert_engine.current_stake, 3.0)
+
+        # Win 2: Stake $3.00 -> should decrease by $1.00 to base floor of $2.00
+        mock_prop.return_value = {"id": "p4", "ask_price": 3.0, "payout": 5.7}
+        mock_buy.return_value = {"contract_id": 2004, "buy_price": 3.0}
+        mock_settle.return_value = {"status": "won", "profit": 2.7, "entry_spot": 100.0, "exit_tick": 99.0}
+
+        asyncio.run(dalembert_engine.execute_trade_cycle())
+        self.assertEqual(dalembert_engine.current_stake, 2.0)
+
+        # Win 3: Stake $2.00 -> should stay clamped at base floor of $2.00
+        mock_prop.return_value = {"id": "p5", "ask_price": 2.0, "payout": 3.8}
+        mock_buy.return_value = {"contract_id": 2005, "buy_price": 2.0}
+        mock_settle.return_value = {"status": "won", "profit": 1.8, "entry_spot": 100.0, "exit_tick": 99.0}
+
+        asyncio.run(dalembert_engine.execute_trade_cycle())
+        self.assertEqual(dalembert_engine.current_stake, 2.0)
+
+    @patch("modules.dbot_engine.determine_contract_direction", new_callable=AsyncMock)
+    @patch("modules.dbot_engine.DBotEngine.get_proposal", new_callable=AsyncMock)
+    def test_conviction_filter_veto(self, mock_prop, mock_dir):
+        """Validates Step 4: Low conviction (<70%) is vetoed and does not place order."""
+        veto_engine = DBotEngine(
+            min_conviction=0.70,
+            persist_session=False,
+            use_streaming=False,
+            continuous_mode=False,
+        )
+        # Mock signal with low conviction (55%)
+        mock_dir.return_value = ("PUT", 0.55, "Compression/Noise")
+
+        should_continue = asyncio.run(veto_engine.execute_trade_cycle())
+        self.assertTrue(should_continue)
+        # Should not have requested proposal or placed buy
+        mock_prop.assert_not_called()
+        self.assertEqual(veto_engine.total_trades, 0)
+
+    def test_htf_trend_evaluation(self):
+        """Validates Step 3: M1 EMA21 vs EMA50 trend determination."""
+        # Bullish candles: steadily rising closes
+        bull_candles = [{"close": 1200.0 + (i * 0.5)} for i in range(50)]
+        trend, ema21, ema50 = evaluate_htf_trend(bull_candles)
+        self.assertEqual(trend, "BULLISH")
+        self.assertGreater(ema21, ema50)
+
+        # Bearish candles: steadily falling closes
+        bear_candles = [{"close": 1200.0 - (i * 0.5)} for i in range(50)]
+        trend, ema21, ema50 = evaluate_htf_trend(bear_candles)
+        self.assertEqual(trend, "BEARISH")
+        self.assertLess(ema21, ema50)
+
+    def test_htf_trend_gating_bans_counter_trend(self):
+        """Validates that a Bullish HTF trend only permits CALL, and Bearish only permits PUT."""
+        prices = [1210.0 + (i % 2) * 0.2 for i in range(25)]  # choppy ticks
+
+        # In Bullish HTF: Must return CALL
+        dir_bull, conv_bull, _ = evaluate_tick_bias(prices, htf_trend="BULLISH", tick_rsi=45.0)
+        self.assertEqual(dir_bull, "CALL")
+
+        # In Bearish HTF: Must return PUT
+        dir_bear, conv_bear, _ = evaluate_tick_bias(prices, htf_trend="BEARISH", tick_rsi=55.0)
+        self.assertEqual(dir_bear, "PUT")
+
+    def test_tick_rsi_calculation(self):
+        """Validates 14-period RSI calculation on ticks."""
+        rising = [100.0 + i for i in range(20)]
+        rsi_high = _calculate_rsi(rising, period=14)
+        self.assertGreater(rsi_high, 70.0)
+
+        falling = [100.0 - i for i in range(20)]
+        rsi_low = _calculate_rsi(falling, period=14)
+        self.assertLess(rsi_low, 30.0)
 
 
 if __name__ == "__main__":
