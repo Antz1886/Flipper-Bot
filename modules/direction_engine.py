@@ -55,45 +55,53 @@ def _calculate_rsi(prices: list[float], period: int = 14) -> float:
 
 
 async def fetch_recent_ticks(symbol: str, count: int = 50) -> list[float]:
-    """Fetch recent tick price sequence directly from Deriv WebSocket."""
+    """Fetch recent tick price sequence directly from Deriv WebSocket with retries."""
     api = get_api()
     if not api or not api.is_active:
         return []
 
-    try:
-        resp = await api.send({
-            "ticks_history": symbol,
-            "end": "latest",
-            "count": count,
-            "style": "ticks",
-        })
-        history = resp.get("history", {})
-        prices = history.get("prices", [])
-        return [float(p) for p in prices]
-    except Exception as e:
-        log.warning(f"Could not retrieve tick history for {symbol}: {e}")
-        return []
+    for attempt in range(1, 4):
+        try:
+            resp = await api.send({
+                "ticks_history": symbol,
+                "end": "latest",
+                "count": count,
+                "style": "ticks",
+            })
+            history = resp.get("history", {})
+            prices = history.get("prices", [])
+            if prices:
+                return [float(p) for p in prices]
+        except Exception as e:
+            log.warning(f"Could not retrieve tick history for {symbol} (attempt {attempt}): {e}")
+        await asyncio.sleep(0.5)
+
+    return []
 
 
 async def fetch_htf_candles(symbol: str, count: int = 60, granularity: int = 60) -> list[dict]:
-    """Fetch higher-timeframe candles (default: M1 / 60s) for macroscopic trend gating."""
+    """Fetch higher-timeframe candles (default: M1 / 60s) for macroscopic trend gating with retries."""
     api = get_api()
     if not api or not api.is_active:
         return []
 
-    try:
-        resp = await api.send({
-            "ticks_history": symbol,
-            "end": "latest",
-            "count": count,
-            "granularity": granularity,
-            "style": "candles",
-        })
-        candles = resp.get("candles", [])
-        return candles
-    except Exception as e:
-        log.warning(f"Could not retrieve HTF candles for {symbol}: {e}")
-        return []
+    for attempt in range(1, 4):
+        try:
+            resp = await api.send({
+                "ticks_history": symbol,
+                "end": "latest",
+                "count": count,
+                "granularity": granularity,
+                "style": "candles",
+            })
+            candles = resp.get("candles", [])
+            if candles:
+                return candles
+        except Exception as e:
+            log.warning(f"Could not retrieve HTF candles for {symbol} (attempt {attempt}): {e}")
+        await asyncio.sleep(0.5)
+
+    return []
 
 
 def evaluate_htf_trend(candles: list[dict]) -> Tuple[str, float, float]:
