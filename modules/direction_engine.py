@@ -8,6 +8,7 @@ Solves directional inelasticity and counter-trend drag on 5-tick Deriv options:
   - Streak-Mitigation: Raises conviction threshold after consecutive losses.
 """
 
+import asyncio
 import logging
 from typing import Tuple
 
