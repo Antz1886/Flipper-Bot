@@ -443,6 +443,9 @@ class DBotEngine:
                 f"⏳ [FILTER VETO] Signal conviction ({conviction*100:.0f}%) < threshold ({self.min_conviction*100:.0f}%). "
                 f"Setup: {rationale}. Waiting for high-probability trigger..."
             )
+            veto_delay = getattr(config, "DBOT_VETO_RETRY_DELAY_S", 5.0)
+            if veto_delay > 0:
+                await asyncio.sleep(veto_delay)
             return True
 
         # Enforce max stake ceiling

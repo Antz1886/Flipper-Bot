@@ -157,13 +157,14 @@ DBOT_STAKING_STRATEGY       = os.getenv("DBOT_STAKING_STRATEGY", "DALEMBERT").up
 DBOT_BASE_STAKE             = float(os.getenv("DBOT_BASE_STAKE", "2.0"))         # Base / Floor stake ($2.00)
 DBOT_DALEMBERT_UNIT         = float(os.getenv("DBOT_DALEMBERT_UNIT", "1.0"))     # D'Alembert step unit (+$1.00 / -$1.00)
 DBOT_MARTINGALE_MULTIPLIER  = float(os.getenv("DBOT_MARTINGALE_MULTIPLIER", "2.0")) # Multiplier on loss (2.0x) if using Martingale
-DBOT_MAX_LOSS_STREAK        = int(os.getenv("DBOT_MAX_LOSS_STREAK", "5"))        # Max consecutive losses before safety halt/reset
-DBOT_ACTION_ON_MAX_LOSS     = os.getenv("DBOT_ACTION_ON_MAX_LOSS", "HALT").upper() # "HALT" or "RESET"
-DBOT_MAX_STAKE              = float(os.getenv("DBOT_MAX_STAKE", "8.0"))          # Safe stake ceiling ($8.00) to prevent exponential blowouts
+DBOT_MAX_LOSS_STREAK        = int(os.getenv("DBOT_MAX_LOSS_STREAK", "4"))        # Max consecutive losses before resetting stake
+DBOT_ACTION_ON_MAX_LOSS     = os.getenv("DBOT_ACTION_ON_MAX_LOSS", "RESET").upper() # "RESET" or "HALT"
+DBOT_MAX_STAKE              = float(os.getenv("DBOT_MAX_STAKE", "5.0"))          # Optimal stake ceiling ($5.00) maximizing expectancy and mitigating deep drawdowns
 DBOT_TAKE_PROFIT_USD        = float(os.getenv("DBOT_TAKE_PROFIT_USD", "50.0"))    # Take profit target ($50.00)
 DBOT_STOP_LOSS_USD          = float(os.getenv("DBOT_STOP_LOSS_USD", "50.0"))      # Cumulative stop loss threshold ($50.00)
 DBOT_INTER_TRADE_DELAY_S    = float(os.getenv("DBOT_INTER_TRADE_DELAY_S", "15.0")) # 15s cooldown between trades to eliminate churn
-DBOT_MIN_CONVICTION         = float(os.getenv("DBOT_MIN_CONVICTION", "0.70"))    # Strict entry trigger: minimum 70% conviction
+DBOT_MIN_CONVICTION         = float(os.getenv("DBOT_MIN_CONVICTION", "0.72"))    # Strict entry trigger: raised to 72% conviction
+DBOT_VETO_RETRY_DELAY_S     = float(os.getenv("DBOT_VETO_RETRY_DELAY_S", "5.0"))  # Seconds to wait when signal is vetoed before checking next tick setup
 DBOT_HTF_TIMEFRAME_S        = int(os.getenv("DBOT_HTF_TIMEFRAME_S", "60"))       # 60s (M1) HTF trend filter
 DBOT_USE_HTF_FILTER         = os.getenv("DBOT_USE_HTF_FILTER", "true").lower() == "true"
 DBOT_USE_RSI_FILTER         = os.getenv("DBOT_USE_RSI_FILTER", "true").lower() == "true"
