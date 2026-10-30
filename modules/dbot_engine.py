@@ -227,12 +227,16 @@ class DBotEngine:
                 await asyncio.sleep(config.RETRY_DELAY_S)
         return None
 
-    async def wait_for_settlement(self, contract_id: int, timeout_s: float = 25.0) -> dict | None:
+    async def wait_for_settlement(self, contract_id: int, timeout_s: float | None = None) -> dict | None:
         """
         Wait for contract settlement.
         Uses Real-Time WebSocket Streaming subscription for zero-lag notification,
         with seamless fallback to polling if subscription stream drops.
         """
+        if timeout_s is None:
+            # Dynamic timeout based on contract duration + 25s buffer
+            duration_s = self.duration if self.duration_unit in ("s", "t") else self.duration * 60
+            timeout_s = max(duration_s + 25.0, 30.0)
         api = await self._ensure_connection()
 
         if self.use_streaming:

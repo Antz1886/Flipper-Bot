@@ -149,8 +149,8 @@ BOT_MODE                    = os.getenv("BOT_MODE", "DBOT").upper()
 DBOT_SYMBOL                 = os.getenv("DBOT_SYMBOL", "1HZ100V")
 DBOT_DIRECTION_MODE         = os.getenv("DBOT_DIRECTION_MODE", "DYNAMIC").upper() # "DYNAMIC", "TREND_FOLLOW", "PUT", "CALL"
 DBOT_CONTRACT_TYPE          = os.getenv("DBOT_CONTRACT_TYPE", "PUT").upper()     # Baseline fallback: "PUT" (Fall) or "CALL" (Rise)
-DBOT_DURATION               = int(os.getenv("DBOT_DURATION", "5"))               # 5 ticks
-DBOT_DURATION_UNIT          = os.getenv("DBOT_DURATION_UNIT", "t")               # "t" for ticks
+DBOT_DURATION               = int(os.getenv("DBOT_DURATION", "60"))              # 60s (1m) duration allows directional momentum to travel
+DBOT_DURATION_UNIT          = os.getenv("DBOT_DURATION_UNIT", "s")               # "s" for seconds ("t" for ticks)
 
 # Staking strategy: "DALEMBERT" (Recommended unit step: +$1 on loss, -$1 on win), "MARTINGALE", or "FLAT"
 DBOT_STAKING_STRATEGY       = os.getenv("DBOT_STAKING_STRATEGY", "DALEMBERT").upper()
@@ -162,13 +162,14 @@ DBOT_ACTION_ON_MAX_LOSS     = os.getenv("DBOT_ACTION_ON_MAX_LOSS", "RESET").uppe
 DBOT_MAX_STAKE              = float(os.getenv("DBOT_MAX_STAKE", "5.0"))          # Optimal stake ceiling ($5.00) maximizing expectancy and mitigating deep drawdowns
 DBOT_TAKE_PROFIT_USD        = float(os.getenv("DBOT_TAKE_PROFIT_USD", "50.0"))    # Take profit target ($50.00)
 DBOT_STOP_LOSS_USD          = float(os.getenv("DBOT_STOP_LOSS_USD", "50.0"))      # Cumulative stop loss threshold ($50.00)
-DBOT_INTER_TRADE_DELAY_S    = float(os.getenv("DBOT_INTER_TRADE_DELAY_S", "15.0")) # 15s cooldown between trades to eliminate churn
-DBOT_MIN_CONVICTION         = float(os.getenv("DBOT_MIN_CONVICTION", "0.72"))    # Strict entry trigger: raised to 72% conviction
+DBOT_INTER_TRADE_DELAY_S    = float(os.getenv("DBOT_INTER_TRADE_DELAY_S", "25.0")) # 25s cooldown between trades to allow structural setups to form
+DBOT_MIN_CONVICTION         = float(os.getenv("DBOT_MIN_CONVICTION", "0.75"))    # Strict entry trigger: raised to 75% conviction
 DBOT_VETO_RETRY_DELAY_S     = float(os.getenv("DBOT_VETO_RETRY_DELAY_S", "5.0"))  # Seconds to wait when signal is vetoed before checking next tick setup
 DBOT_HTF_TIMEFRAME_S        = int(os.getenv("DBOT_HTF_TIMEFRAME_S", "60"))       # 60s (M1) HTF trend filter
 DBOT_USE_HTF_FILTER         = os.getenv("DBOT_USE_HTF_FILTER", "true").lower() == "true"
 DBOT_USE_RSI_FILTER         = os.getenv("DBOT_USE_RSI_FILTER", "true").lower() == "true"
 DBOT_RSI_PERIOD             = int(os.getenv("DBOT_RSI_PERIOD", "14"))
+DBOT_USE_CHOP_FILTER        = os.getenv("DBOT_USE_CHOP_FILTER", "true").lower() == "true"
 DBOT_PERSIST_SESSION        = os.getenv("DBOT_PERSIST_SESSION", "true").lower() == "true" # Resilient session persistence on disk
 DBOT_USE_STREAMING          = os.getenv("DBOT_USE_STREAMING", "true").lower() == "true"   # Real-time WebSocket streaming settlement
 DBOT_CONTINUOUS_MODE        = os.getenv("DBOT_CONTINUOUS_MODE", "true").lower() == "true" # Continuous automated cycles (user preference)

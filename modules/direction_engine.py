@@ -55,6 +55,17 @@ def _calculate_rsi(prices: list[float], period: int = 14) -> float:
     return 100.0 - (100.0 / (1.0 + rs))
 
 
+def _calculate_atr(prices: list[float], period: int = 14) -> float:
+    """Calculate Average True Range (ATR) over tick price series."""
+    if len(prices) < period + 1:
+        return 0.0
+    ranges = [abs(prices[i] - prices[i - 1]) for i in range(1, len(prices))]
+    if not ranges:
+        return 0.0
+    recent = ranges[-period:]
+    return sum(recent) / len(recent)
+
+
 async def fetch_recent_ticks(symbol: str, count: int = 50) -> list[float]:
     """Fetch recent tick price sequence directly from Deriv WebSocket with retries."""
     api = get_api()
@@ -160,44 +171,55 @@ def evaluate_tick_bias(
     if tick_rsi == 50.0 and len(prices) >= 15:
         tick_rsi = _calculate_rsi(prices, period=14)
 
-    # 3. Macro Trend Gating (M1 EMA Alignment)
+    # 3. Volatility Regime / Chop Filter (ATR Squeeze Protection)
+    if len(prices) >= 20:
+        atr_fast = _calculate_atr(prices, period=7)
+        atr_slow = _calculate_atr(prices, period=20)
+        # If volatility has collapsed by >35% compared to baseline, market is in flat squeeze/chop
+        if atr_slow > 0 and (atr_fast / atr_slow) < 0.65:
+            return (
+                preferred_default,
+                0.40,
+                f"Volatility Squeeze / Dead Chop (ATR7 {atr_fast:.3f} < 65% of ATR20 {atr_slow:.3f}). Sitting out.",
+            )
+
+    # 4. Macro Trend Gating (M1 EMA Alignment) with Asymmetric Pullback Requirements
     if htf_trend == "BULLISH":
         # In a bullish HTF trend: ONLY allow CALL options (ban counter-trend PUTs)
-        if tick_rsi > 75.0:
-            # Overbought top: do not buy at the top, wait for pullback
+        # Tightened CALL filter: Require deeper pullback (RSI <= 45) to avoid buying near local crests
+        if tick_rsi > 68.0:
             return (
                 "CALL",
                 0.45,
-                f"Bullish HTF (M1), but Tick RSI ({tick_rsi:.1f}) is overbought (>75). Waiting for dip.",
+                f"Bullish HTF (M1), but Tick RSI ({tick_rsi:.1f}) is elevated (>68). Waiting for dip.",
             )
-        elif tick_rsi <= 55.0 and down_ticks >= 1:
+        elif tick_rsi <= 45.0 and down_ticks >= 1:
             # High-conviction pullback entry in an uptrend
             return (
                 "CALL",
                 0.85,
-                f"Bullish HTF alignment + Dip pullback entry (RSI {tick_rsi:.1f}, {down_ticks} down ticks into support)",
+                f"Bullish HTF alignment + Deep dip pullback entry (RSI {tick_rsi:.1f} <= 45, {down_ticks} down ticks into support)",
             )
-        elif is_uptrend or up_ticks >= 2:
+        elif (is_uptrend or up_ticks >= 2) and tick_rsi <= 55.0:
             return (
                 "CALL",
                 0.80,
-                f"Bullish HTF continuation (EMA5 > EMA15, RSI {tick_rsi:.1f})",
+                f"Bullish HTF continuation (EMA5 > EMA15, RSI {tick_rsi:.1f} <= 55)",
             )
         else:
             return (
                 "CALL",
-                0.72,
-                f"Bullish HTF bias (RSI {tick_rsi:.1f})",
+                0.60,
+                f"Bullish HTF bias but awaiting cleaner dip (RSI {tick_rsi:.1f})",
             )
 
     elif htf_trend == "BEARISH":
         # In a bearish HTF trend: ONLY allow PUT options (ban counter-trend CALLs)
-        if tick_rsi < 25.0:
-            # Oversold bottom: do not short at the bottom, wait for bounce
+        if tick_rsi < 30.0:
             return (
                 "PUT",
                 0.45,
-                f"Bearish HTF (M1), but Tick RSI ({tick_rsi:.1f}) is oversold (<25). Waiting for bounce.",
+                f"Bearish HTF (M1), but Tick RSI ({tick_rsi:.1f}) is oversold (<30). Waiting for bounce.",
             )
         elif tick_rsi >= 45.0 and up_ticks >= 1:
             # High-conviction bounce fade in a downtrend
