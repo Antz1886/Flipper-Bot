@@ -155,7 +155,9 @@ class DBotEngine:
         api = connector.get_api()
         if not api or not api.is_active or not api.authorized:
             log.warning("Deriv API session disconnected or unauthorized. Re-establishing connection...")
-            success = await connector.reconnect()
+            success = await connector.ensure_connected()
+            if not success:
+                success = await connector.reconnect()
             if not success:
                 raise ConnectionError("Failed to reconnect to Deriv WebSocket API.")
             api = connector.get_api()
@@ -342,14 +344,23 @@ class DBotEngine:
     async def execute_trade_cycle(self) -> bool:
         """
         Execute an institutional DBot trade cycle:
-          1. Circuit breaker checks (TP, SL, Max Loss Streak).
-          2. Dynamic direction & micro-momentum evaluation (PUT vs CALL).
-          3. Sizing clamp to max_stake ceiling.
-          4. Get proposal & buy contract.
-          5. Real-time streaming settlement.
-          6. Martingale scaling or win reset.
-          7. Atomic session persistence.
+          1. Ensure active WebSocket connection.
+          2. Circuit breaker checks (TP, SL, Max Loss Streak).
+          3. Dynamic direction & micro-momentum evaluation (PUT vs CALL).
+          4. Sizing clamp to max_stake ceiling.
+          5. Get proposal & buy contract.
+          6. Real-time streaming settlement.
+          7. Martingale scaling or win reset.
+          8. Atomic session persistence.
         """
+        # Ensure WebSocket session is active and healthy before evaluating trades
+        try:
+            await self._ensure_connection()
+        except Exception as e:
+            log.warning(f"Connection check failed in execute_trade_cycle: {e}. Retrying in 5s...")
+            await asyncio.sleep(5.0)
+            return True
+
         # Circuit Breaker 1: Take Profit Target Hit
         if self.session_pnl >= self.take_profit_usd and self.take_profit_usd > 0:
             if self.continuous_mode:

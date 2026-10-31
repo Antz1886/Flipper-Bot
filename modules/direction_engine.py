@@ -13,7 +13,7 @@ import logging
 from typing import Tuple
 
 import config
-from modules.connector import get_api
+from modules import connector
 
 log = logging.getLogger("direction_engine")
 
@@ -68,7 +68,14 @@ def _calculate_atr(prices: list[float], period: int = 14) -> float:
 
 async def fetch_recent_ticks(symbol: str, count: int = 50) -> list[float]:
     """Fetch recent tick price sequence directly from Deriv WebSocket with retries."""
-    api = get_api()
+    api = connector.get_api()
+    if not api or not api.is_active or not api.authorized:
+        try:
+            await connector.ensure_connected()
+            api = connector.get_api()
+        except Exception as e:
+            log.warning(f"Failed to auto-reconnect in fetch_recent_ticks: {e}")
+
     if not api or not api.is_active:
         log.warning(f"get_api() is None or not active (api={api})")
         return []
@@ -97,7 +104,14 @@ async def fetch_recent_ticks(symbol: str, count: int = 50) -> list[float]:
 
 async def fetch_htf_candles(symbol: str, count: int = 60, granularity: int = 60) -> list[dict]:
     """Fetch higher-timeframe candles (default: M1 / 60s) for macroscopic trend gating with retries."""
-    api = get_api()
+    api = connector.get_api()
+    if not api or not api.is_active or not api.authorized:
+        try:
+            await connector.ensure_connected()
+            api = connector.get_api()
+        except Exception as e:
+            log.warning(f"Failed to auto-reconnect in fetch_htf_candles: {e}")
+
     if not api or not api.is_active:
         return []
 

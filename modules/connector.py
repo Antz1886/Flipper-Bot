@@ -434,6 +434,17 @@ async def ensure_connected() -> bool:
     return await _api.ensure_connected()
 
 
+async def reconnect() -> bool:
+    global _api
+    if _api is not None:
+        try:
+            await _api.disconnect()
+        except Exception:
+            pass
+    _api = DerivAPI()
+    return await _api.connect()
+
+
 def get_api() -> DerivAPI:
     return _api
 
