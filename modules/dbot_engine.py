@@ -68,6 +68,20 @@ class DBotEngine:
         self.continuous_mode = continuous_mode
         self.cycle_count: int = 1
 
+        # Institutional Daily Risk Governor (Quant-Validated $50 Daily Envelope)
+        self.enforce_daily_limits: bool = getattr(config, "DBOT_ENFORCE_DAILY_LIMITS", True)
+        self.daily_max_stake_usd: float = float(getattr(config, "DBOT_DAILY_MAX_STAKE_USD", 50.0))
+        self.daily_stop_loss_usd: float = float(getattr(config, "DBOT_DAILY_STOP_LOSS_USD", 50.0))
+        self.daily_take_profit_usd: float = float(getattr(config, "DBOT_DAILY_TAKE_PROFIT_USD", 50.0))
+
+        # Intraday Tracking
+        self.daily_date_utc: str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self.daily_net_pnl: float = 0.0
+        self.daily_staked_total: float = 0.0
+        self.daily_trades: int = 0
+        self.daily_wins: int = 0
+        self.daily_losses: int = 0
+
         self.session_id: str = uuid.uuid4().hex[:12]
         self.current_stake: float = self.base_stake
         self.consecutive_losses: int = 0
@@ -107,6 +121,60 @@ class DBotEngine:
             self.session_pnl = float(saved.get("session_pnl", 0.0))
             self.session_status = saved.get("status", "RUNNING")
 
+            today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            saved_date = saved.get("date_utc")
+            if saved_date == today_utc:
+                self.daily_date_utc = saved_date
+                self.daily_net_pnl = float(saved.get("daily_net_pnl", 0.0))
+                self.daily_staked_total = float(saved.get("daily_staked_total", 0.0))
+                self.daily_trades = int(saved.get("daily_trades", 0))
+                self.daily_wins = int(saved.get("daily_wins", 0))
+                self.daily_losses = int(saved.get("daily_losses", 0))
+            else:
+                self._reset_daily_metrics(today_utc)
+
+    def _reset_daily_metrics(self, new_date_utc: str):
+        """Reset intraday metrics when UTC calendar day rolls over midnight."""
+        log.info(f"🌅 [DAILY ROLLOVER] Resetting daily metrics for fresh UTC day: {new_date_utc}")
+        self.daily_date_utc = new_date_utc
+        self.daily_net_pnl = 0.0
+        self.daily_staked_total = 0.0
+        self.daily_trades = 0
+        self.daily_wins = 0
+        self.daily_losses = 0
+
+    def _check_and_roll_daily_utc(self) -> bool:
+        """Check if UTC date has changed and reset metrics if rolled over."""
+        current_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if current_utc != self.daily_date_utc:
+            self._reset_daily_metrics(current_utc)
+            return True
+        return False
+
+    async def _wait_for_next_utc_day(self, reason: str):
+        """Wait until 00:00 UTC rollover when daily limits are triggered."""
+        log.warning("=" * 80)
+        log.warning(f"🛑 [DAILY LIMIT REACHED] {reason}")
+        log.warning(
+            f"   Daily Net P&L: ${self.daily_net_pnl:+.2f} | Total Staked: ${self.daily_staked_total:.2f} "
+            f"({self.daily_wins}W/{self.daily_losses}L in {self.daily_trades} trades)"
+        )
+        log.warning("   Trading halted until 00:00 UTC to protect capital.")
+        log.warning("=" * 80)
+        self._save_current_state(status="DAILY_LIMIT_HALT")
+
+        while self.is_running:
+            current_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if current_utc != self.daily_date_utc:
+                log.info(f"🌅 New UTC day ({current_utc}) detected! Re-opening trading.")
+                self._reset_daily_metrics(current_utc)
+                self.session_pnl = 0.0
+                self.current_stake = self.base_stake
+                self.consecutive_losses = 0
+                self._save_current_state(status="RUNNING")
+                break
+            await asyncio.sleep(20.0)
+
     def _save_current_state(self, status: str = "RUNNING"):
         """Save active state to disk."""
         self.session_status = status
@@ -121,6 +189,12 @@ class DBotEngine:
                 current_stake=self.current_stake,
                 session_pnl=self.session_pnl,
                 status=status,
+                daily_net_pnl=self.daily_net_pnl,
+                daily_staked_total=self.daily_staked_total,
+                daily_trades=self.daily_trades,
+                daily_wins=self.daily_wins,
+                daily_losses=self.daily_losses,
+                daily_date_utc=self.daily_date_utc,
             )
 
     def log_header(self):
@@ -141,8 +215,13 @@ class DBotEngine:
         log.info(f"   Max Stake Cap       : ${self.max_stake:.2f} USD")
         log.info(f"   Min Conviction Gate : {self.min_conviction*100:.0f}%")
         log.info(f"   Max Loss Streak     : {self.max_loss_streak} (Action: {self.action_on_max_loss})")
-        log.info(f"   Session Take Profit : +${self.take_profit_usd:.2f} USD")
-        log.info(f"   Session Stop Loss   : -${self.stop_loss_usd:.2f} USD")
+        log.info(f"   Cycle Take Profit   : +${self.take_profit_usd:.2f} USD")
+        log.info(f"   Cycle Stop Loss     : -${self.stop_loss_usd:.2f} USD")
+        if self.enforce_daily_limits:
+            log.info(f"   Daily Stake Cap     : ${self.daily_max_stake_usd:.2f} USD (Prevents Over-Trading Churn)")
+            log.info(f"   Daily Stop Loss     : -${self.daily_stop_loss_usd:.2f} USD (Hard Daily Loss Ceiling)")
+            log.info(f"   Daily Take Profit   : +${self.daily_take_profit_usd:.2f} USD (Daily Profit Locked)")
+            log.info(f"   Daily Progress      : ${self.daily_net_pnl:+.2f} USD (${self.daily_staked_total:.2f} staked)")
         log.info(f"   Streaming Execution : {'Real-Time WebSocket' if self.use_streaming else 'Polling (0.8s)'}")
         log.info(f"   Session Persistence : {'Active (data/dbot_session.json)' if self.persist_session else 'Disabled'}")
         log.info(f"   Inter-Trade Delay   : {self.inter_trade_delay}s")
@@ -361,7 +440,31 @@ class DBotEngine:
             await asyncio.sleep(5.0)
             return True
 
-        # Circuit Breaker 1: Take Profit Target Hit
+        # Daily UTC Rollover Check
+        self._check_and_roll_daily_utc()
+
+        # Institutional Daily Risk Governor Checks ($50 Daily Envelope)
+        if self.enforce_daily_limits:
+            if self.daily_net_pnl <= -self.daily_stop_loss_usd and self.daily_stop_loss_usd > 0:
+                await self._wait_for_next_utc_day(
+                    f"Daily Stop-Loss limit (-${self.daily_stop_loss_usd:.2f}) reached."
+                )
+                return True
+
+            if self.daily_net_pnl >= self.daily_take_profit_usd and self.daily_take_profit_usd > 0:
+                await self._wait_for_next_utc_day(
+                    f"Daily Take-Profit target (+${self.daily_take_profit_usd:.2f}) secured!"
+                )
+                return True
+
+            estimated_stake = min(round(self.current_stake, 2), self.max_stake)
+            if self.daily_max_stake_usd > 0 and (self.daily_staked_total + estimated_stake > self.daily_max_stake_usd):
+                await self._wait_for_next_utc_day(
+                    f"Daily Stake Budget (${self.daily_max_stake_usd:.2f}) reached. Total staked today: ${self.daily_staked_total:.2f}."
+                )
+                return True
+
+        # Circuit Breaker 1: Take Profit Target Hit (Per-Cycle)
         if self.session_pnl >= self.take_profit_usd and self.take_profit_usd > 0:
             if self.continuous_mode:
                 log.info("=" * 80)
@@ -533,10 +636,16 @@ class DBotEngine:
 
         win_rate = (self.total_wins / self.total_trades) * 100 if self.total_trades > 0 else 0.0
 
+        # Update Institutional Daily Tracking
+        self.daily_trades += 1
+        self.daily_staked_total += ask_price
+        self.daily_net_pnl += profit
+
         if status == "won" or profit > 0:
             self.total_wins += 1
             self.consecutive_wins += 1
             self.consecutive_losses = 0
+            self.daily_wins += 1
 
             if self.staking_strategy == "DALEMBERT":
                 # D'Alembert: decrease stake by 1 unit on win (floor: base_stake)
@@ -547,16 +656,18 @@ class DBotEngine:
                 # Martingale: reset to base stake
                 self.current_stake = self.base_stake
 
+            daily_info = f" | Daily: ${self.daily_net_pnl:+.2f} (${self.daily_staked_total:.2f}/${self.daily_max_stake_usd:.2f} staked)" if self.enforce_daily_limits else ""
             log.info(
                 f"✅ [WIN] #{trade_num} Contract #{contract_id} | Entry: {entry_spot} -> Exit: {exit_tick} | "
                 f"Profit: +${profit:.2f} | Session PnL: ${self.session_pnl:+.2f} "
-                f"(Wins: {self.total_wins}/{self.total_trades}, WR: {win_rate:.1f}%) | "
+                f"(Wins: {self.total_wins}/{self.total_trades}, WR: {win_rate:.1f}%){daily_info} | "
                 f"Next Stake ({self.staking_strategy}): ${self.current_stake:.2f}"
             )
         else:
             self.total_losses += 1
             self.consecutive_losses += 1
             self.consecutive_wins = 0
+            self.daily_losses += 1
 
             if self.staking_strategy == "DALEMBERT":
                 # D'Alembert: increase stake by 1 unit on loss (ceiling: max_stake)
@@ -570,10 +681,11 @@ class DBotEngine:
                 self.current_stake = min(next_stake, self.max_stake)
                 sizing_desc = f"x{self.martingale_multiplier:.1f}"
 
+            daily_info = f" | Daily: ${self.daily_net_pnl:+.2f} (${self.daily_staked_total:.2f}/${self.daily_max_stake_usd:.2f} staked)" if self.enforce_daily_limits else ""
             log.info(
                 f"❌ [LOSS] #{trade_num} Contract #{contract_id} | Entry: {entry_spot} -> Exit: {exit_tick} | "
                 f"Loss: -${abs(profit):.2f} | Session PnL: ${self.session_pnl:+.2f} "
-                f"(Losses: {self.total_losses}/{self.total_trades}, WR: {win_rate:.1f}%) | "
+                f"(Losses: {self.total_losses}/{self.total_trades}, WR: {win_rate:.1f}%){daily_info} | "
                 f"Next Stake ({sizing_desc}): ${self.current_stake:.2f} (Streak: {self.consecutive_losses})"
             )
 

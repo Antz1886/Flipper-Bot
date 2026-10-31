@@ -47,7 +47,8 @@ class SessionStateManager:
                 f"🔄 [SESSION RESUMED] Restored state from disk (ID: {data.get('session_id', 'N/A')[:8]}): "
                 f"Trades: {data.get('total_trades', 0)} | W/L: {data.get('total_wins', 0)}/{data.get('total_losses', 0)} | "
                 f"Streak: {data.get('consecutive_losses', 0)}L | Next Stake: ${data.get('current_stake', 2.0):.2f} | "
-                f"Session P&L: ${data.get('session_pnl', 0.0):+.2f} | Status: {data.get('status', 'RUNNING')}"
+                f"Cycle P&L: ${data.get('session_pnl', 0.0):+.2f} | Daily Net: ${data.get('daily_net_pnl', 0.0):+.2f} "
+                f"(${data.get('daily_staked_total', 0.0):.2f} staked) | Status: {data.get('status', 'RUNNING')}"
             )
             return data
         except Exception as e:
@@ -65,12 +66,18 @@ class SessionStateManager:
         current_stake: float,
         session_pnl: float,
         status: str = "RUNNING",
+        daily_net_pnl: float = 0.0,
+        daily_staked_total: float = 0.0,
+        daily_trades: int = 0,
+        daily_wins: int = 0,
+        daily_losses: int = 0,
+        daily_date_utc: str | None = None,
     ):
         """Atomically persist session state to prevent corruption on crash."""
         now_utc = datetime.now(timezone.utc)
         payload = {
             "session_id": session_id,
-            "date_utc": now_utc.strftime("%Y-%m-%d"),
+            "date_utc": daily_date_utc or now_utc.strftime("%Y-%m-%d"),
             "updated_at": now_utc.isoformat(),
             "total_trades": total_trades,
             "total_wins": total_wins,
@@ -80,6 +87,11 @@ class SessionStateManager:
             "current_stake": round(current_stake, 2),
             "session_pnl": round(session_pnl, 2),
             "status": status,
+            "daily_net_pnl": round(daily_net_pnl, 2),
+            "daily_staked_total": round(daily_staked_total, 2),
+            "daily_trades": daily_trades,
+            "daily_wins": daily_wins,
+            "daily_losses": daily_losses,
         }
 
         try:

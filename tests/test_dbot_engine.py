@@ -97,6 +97,8 @@ class TestDirectionEngine(unittest.TestCase):
 
 class TestDBotEngine(unittest.TestCase):
     def setUp(self):
+        self.conn_patcher = patch.object(DBotEngine, "_ensure_connection", new_callable=AsyncMock)
+        self.mock_ensure_conn = self.conn_patcher.start()
         self.engine = DBotEngine(
             symbol="1HZ100V",
             direction_mode="PUT",
@@ -117,6 +119,9 @@ class TestDBotEngine(unittest.TestCase):
             use_streaming=False,
             continuous_mode=False,
         )
+
+    def tearDown(self):
+        self.conn_patcher.stop()
 
     def test_initialization(self):
         self.assertEqual(self.engine.symbol, "1HZ100V")
@@ -399,6 +404,58 @@ class TestDBotEngine(unittest.TestCase):
         falling = [100.0 - i for i in range(20)]
         rsi_low = _calculate_rsi(falling, period=14)
         self.assertLess(rsi_low, 30.0)
+
+    @patch("modules.dbot_engine.DBotEngine._wait_for_next_utc_day", new_callable=AsyncMock)
+    def test_daily_stop_loss_trigger(self, mock_wait):
+        """Validates that daily net loss hitting -$50 triggers wait for next UTC day."""
+        engine = DBotEngine(persist_session=False, use_streaming=False)
+        engine.enforce_daily_limits = True
+        engine.daily_stop_loss_usd = 50.0
+        engine.daily_net_pnl = -52.0  # Loss limit breached
+
+        asyncio.run(engine.execute_trade_cycle())
+        mock_wait.assert_called_once()
+        self.assertIn("Daily Stop-Loss limit", mock_wait.call_args[0][0])
+
+    @patch("modules.dbot_engine.DBotEngine._wait_for_next_utc_day", new_callable=AsyncMock)
+    def test_daily_take_profit_trigger(self, mock_wait):
+        """Validates that daily profit target reaching +$50 triggers wait for next UTC day."""
+        engine = DBotEngine(persist_session=False, use_streaming=False)
+        engine.enforce_daily_limits = True
+        engine.daily_take_profit_usd = 50.0
+        engine.daily_net_pnl = 51.5  # Profit target reached
+
+        asyncio.run(engine.execute_trade_cycle())
+        mock_wait.assert_called_once()
+        self.assertIn("Daily Take-Profit target", mock_wait.call_args[0][0])
+
+    @patch("modules.dbot_engine.DBotEngine._wait_for_next_utc_day", new_callable=AsyncMock)
+    def test_daily_stake_turnover_cap(self, mock_wait):
+        """Validates that daily turnover exceeding $50 cap triggers wait for next UTC day."""
+        engine = DBotEngine(persist_session=False, use_streaming=False)
+        engine.enforce_daily_limits = True
+        engine.daily_max_stake_usd = 50.0
+        engine.daily_staked_total = 49.0
+        engine.current_stake = 2.0  # 49 + 2 = 51 > 50
+
+        asyncio.run(engine.execute_trade_cycle())
+        mock_wait.assert_called_once()
+        self.assertIn("Daily Stake Budget", mock_wait.call_args[0][0])
+
+    def test_daily_rollover_resets_metrics(self):
+        """Validates that UTC date change resets daily metrics to 0."""
+        engine = DBotEngine(persist_session=False, use_streaming=False)
+        engine.daily_date_utc = "2026-10-30"
+        engine.daily_net_pnl = -45.0
+        engine.daily_staked_total = 48.0
+        engine.daily_trades = 20
+
+        # Simulate rollover to 2026-10-31
+        rolled = engine._check_and_roll_daily_utc()
+        self.assertTrue(rolled)
+        self.assertEqual(engine.daily_net_pnl, 0.0)
+        self.assertEqual(engine.daily_staked_total, 0.0)
+        self.assertEqual(engine.daily_trades, 0)
 
 
 if __name__ == "__main__":

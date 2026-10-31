@@ -160,8 +160,14 @@ DBOT_MARTINGALE_MULTIPLIER  = float(os.getenv("DBOT_MARTINGALE_MULTIPLIER", "2.0
 DBOT_MAX_LOSS_STREAK        = int(os.getenv("DBOT_MAX_LOSS_STREAK", "4"))        # Max consecutive losses before resetting stake
 DBOT_ACTION_ON_MAX_LOSS     = os.getenv("DBOT_ACTION_ON_MAX_LOSS", "RESET").upper() # "RESET" or "HALT"
 DBOT_MAX_STAKE              = float(os.getenv("DBOT_MAX_STAKE", "5.0"))          # Optimal stake ceiling ($5.00) maximizing expectancy and mitigating deep drawdowns
-DBOT_TAKE_PROFIT_USD        = float(os.getenv("DBOT_TAKE_PROFIT_USD", "50.0"))    # Take profit target ($50.00)
-DBOT_STOP_LOSS_USD          = float(os.getenv("DBOT_STOP_LOSS_USD", "50.0"))      # Cumulative stop loss threshold ($50.00)
+DBOT_TAKE_PROFIT_USD        = float(os.getenv("DBOT_TAKE_PROFIT_USD", "50.0"))    # Take profit target ($50.00 per cycle)
+DBOT_STOP_LOSS_USD          = float(os.getenv("DBOT_STOP_LOSS_USD", "50.0"))      # Cumulative stop loss threshold ($50.00 per cycle)
+
+# Institutional Daily Risk Governor (Quant-Validated $50 Daily Envelope)
+DBOT_ENFORCE_DAILY_LIMITS    = os.getenv("DBOT_ENFORCE_DAILY_LIMITS", "true").lower() == "true"
+DBOT_DAILY_MAX_STAKE_USD     = float(os.getenv("DBOT_DAILY_MAX_STAKE_USD", "50.0"))    # Maximum cumulative stakes per calendar day ($50.00 turns churn into profit)
+DBOT_DAILY_STOP_LOSS_USD     = float(os.getenv("DBOT_DAILY_STOP_LOSS_USD", "50.0"))    # Hard daily stop loss ($50.00 max daily net loss)
+DBOT_DAILY_TAKE_PROFIT_USD   = float(os.getenv("DBOT_DAILY_TAKE_PROFIT_USD", "50.0"))  # Hard daily take profit ($50.00 daily profit target banked)
 DBOT_INTER_TRADE_DELAY_S    = float(os.getenv("DBOT_INTER_TRADE_DELAY_S", "25.0")) # 25s cooldown between trades to allow structural setups to form
 DBOT_MIN_CONVICTION         = float(os.getenv("DBOT_MIN_CONVICTION", "0.75"))    # Strict entry trigger: raised to 75% conviction
 DBOT_VETO_RETRY_DELAY_S     = float(os.getenv("DBOT_VETO_RETRY_DELAY_S", "5.0"))  # Seconds to wait when signal is vetoed before checking next tick setup
