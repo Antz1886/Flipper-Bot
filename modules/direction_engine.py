@@ -70,6 +70,7 @@ async def fetch_recent_ticks(symbol: str, count: int = 50) -> list[float]:
     """Fetch recent tick price sequence directly from Deriv WebSocket with retries."""
     api = get_api()
     if not api or not api.is_active:
+        log.warning(f"get_api() is None or not active (api={api})")
         return []
 
     for attempt in range(1, 4):
@@ -84,6 +85,9 @@ async def fetch_recent_ticks(symbol: str, count: int = 50) -> list[float]:
             prices = history.get("prices", [])
             if prices:
                 return [float(p) for p in prices]
+            error = resp.get("error")
+            if error:
+                log.warning(f"Deriv ticks_history error for {symbol}: {error}")
         except Exception as e:
             log.warning(f"Could not retrieve tick history for {symbol} (attempt {attempt}): {e}")
         await asyncio.sleep(0.5)
