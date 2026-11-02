@@ -43,6 +43,8 @@ class DBotEngine:
         stop_loss_usd: float = getattr(config, "DBOT_STOP_LOSS_USD", 50.0),
         inter_trade_delay: float = getattr(config, "DBOT_INTER_TRADE_DELAY_S", 15.0),
         min_conviction: float = getattr(config, "DBOT_MIN_CONVICTION", 0.70),
+        conviction_high_stake: float = getattr(config, "DBOT_CONVICTION_HIGH_STAKE", 3.0),
+        conviction_threshold_high: float = getattr(config, "DBOT_CONVICTION_THRESHOLD_HIGH", 0.85),
         persist_session: bool = getattr(config, "DBOT_PERSIST_SESSION", True),
         use_streaming: bool = getattr(config, "DBOT_USE_STREAMING", True),
         continuous_mode: bool = getattr(config, "DBOT_CONTINUOUS_MODE", True),
@@ -54,6 +56,8 @@ class DBotEngine:
         self.duration_unit = duration_unit
         self.staking_strategy = staking_strategy.upper()
         self.base_stake = float(base_stake)
+        self.conviction_high_stake = float(conviction_high_stake)
+        self.conviction_threshold_high = float(conviction_threshold_high)
         self.dalembert_unit = float(dalembert_unit)
         self.martingale_multiplier = float(martingale_multiplier)
         self.max_loss_streak = int(max_loss_streak)
@@ -566,8 +570,18 @@ class DBotEngine:
                 await asyncio.sleep(veto_delay)
             return True
 
-        # Enforce max stake ceiling
-        stake_to_use = min(round(self.current_stake, 2), self.max_stake)
+        # Determine stake sizing based on strategy
+        if self.staking_strategy == "CONVICTION":
+            if conviction >= self.conviction_threshold_high and self.consecutive_losses == 0:
+                stake_to_use = min(self.conviction_high_stake, self.max_stake)
+                sizing_label = f"CONVICTION-HIGH (${stake_to_use:.2f})"
+            else:
+                stake_to_use = self.base_stake
+                sizing_label = f"CONVICTION-BASE (${stake_to_use:.2f})"
+            self.current_stake = stake_to_use
+        else:
+            stake_to_use = min(round(self.current_stake, 2), self.max_stake)
+            sizing_label = self.staking_strategy
 
         # Pre-execution balance sufficiency check
         current_bal = await self.refresh_balance()
@@ -583,7 +597,7 @@ class DBotEngine:
         trade_num = self.total_trades
 
         log.info(
-            f"─── Trade #{trade_num} | Sizing: ${stake_to_use:.2f} ({self.staking_strategy}) | "
+            f"─── Trade #{trade_num} | Sizing: ${stake_to_use:.2f} ({sizing_label}) | "
             f"Direction: {chosen_dir} ({conviction*100:.0f}% conv) | Streak: {self.consecutive_losses}L ───"
         )
         log.info(f"    Edge Rationale: {rationale}")
@@ -650,7 +664,7 @@ class DBotEngine:
             if self.staking_strategy == "DALEMBERT":
                 # D'Alembert: decrease stake by 1 unit on win (floor: base_stake)
                 self.current_stake = max(round(self.current_stake - self.dalembert_unit, 2), self.base_stake)
-            elif self.staking_strategy == "FLAT":
+            elif self.staking_strategy in ("FLAT", "CONVICTION"):
                 self.current_stake = self.base_stake
             else:
                 # Martingale: reset to base stake
@@ -673,6 +687,10 @@ class DBotEngine:
                 # D'Alembert: increase stake by 1 unit on loss (ceiling: max_stake)
                 self.current_stake = min(round(self.current_stake + self.dalembert_unit, 2), self.max_stake)
                 sizing_desc = f"+${self.dalembert_unit:.2f}"
+            elif self.staking_strategy == "CONVICTION":
+                # Anti-Gambler's Fallacy: Never scale up after a loss; reset to base stake
+                self.current_stake = self.base_stake
+                sizing_desc = "flat-reset"
             elif self.staking_strategy == "FLAT":
                 self.current_stake = self.base_stake
                 sizing_desc = "flat"

@@ -162,6 +162,7 @@ def evaluate_tick_bias(
     preferred_default: str = "PUT",
     htf_trend: str = "NEUTRAL",
     tick_rsi: float = 50.0,
+    dual_htf_aligned: bool = False,
 ) -> Tuple[str, float, str]:
     """
     Evaluates micro-trend, tick momentum, HTF trend alignment, and RSI exhaustion.
@@ -179,84 +180,96 @@ def evaluate_tick_bias(
     is_downtrend = ema_fast < ema_slow and current_price < ema_slow
     is_uptrend = ema_fast > ema_slow and current_price > ema_slow
 
-    # 2. Short-term tick delta (last 4 ticks)
+    # 2. Structural price action over multi-tick window (15-20 ticks)
     recent_ticks = prices[-4:]
     tick_deltas = [recent_ticks[i] - recent_ticks[i - 1] for i in range(1, len(recent_ticks))]
     down_ticks = sum(1 for d in tick_deltas if d < 0)
     up_ticks = sum(1 for d in tick_deltas if d > 0)
+
+    window_ticks = prices[-15:] if len(prices) >= 15 else prices
+    min_window = min(window_ticks)
+    max_window = max(window_ticks)
+    is_higher_low = current_price > min_window and (current_price - min_window) > 0.10 * (max_window - min_window + 1e-6)
+    is_lower_high = current_price < max_window and (max_window - current_price) > 0.10 * (max_window - min_window + 1e-6)
 
     # If RSI not explicitly provided, calculate from price sequence
     if tick_rsi == 50.0 and len(prices) >= 15:
         tick_rsi = _calculate_rsi(prices, period=14)
 
     # 3. Volatility Regime / Chop Filter (ATR Squeeze Protection)
+    chop_ratio = getattr(config, "DBOT_CHOP_RATIO", 0.75)
     if len(prices) >= 20:
         atr_fast = _calculate_atr(prices, period=7)
         atr_slow = _calculate_atr(prices, period=20)
-        # If volatility has collapsed by >35% compared to baseline, market is in flat squeeze/chop
-        if atr_slow > 0 and (atr_fast / atr_slow) < 0.65:
+        # If volatility has collapsed by > (1 - chop_ratio), market is in flat squeeze/chop
+        if atr_slow > 0 and (atr_fast / atr_slow) < chop_ratio:
             return (
                 preferred_default,
                 0.40,
-                f"Volatility Squeeze / Dead Chop (ATR7 {atr_fast:.3f} < 65% of ATR20 {atr_slow:.3f}). Sitting out.",
+                f"Volatility Squeeze / Dead Chop (ATR7 {atr_fast:.3f} < {chop_ratio*100:.0f}% of ATR20 {atr_slow:.3f}). Sitting out.",
             )
 
-    # 4. Macro Trend Gating (M1 EMA Alignment) with Asymmetric Pullback Requirements
+    # 4. Macro Trend Gating (Dual HTF / M1 EMA Alignment) with Structural Pullback Requirements
     if htf_trend == "BULLISH":
         # In a bullish HTF trend: ONLY allow CALL options (ban counter-trend PUTs)
-        # Tightened CALL filter: Require deeper pullback (RSI <= 45) to avoid buying near local crests
+        align_desc = "Dual HTF (M5+M1) Consensus" if dual_htf_aligned else "Bullish HTF (M1)"
         if tick_rsi > 68.0:
             return (
                 "CALL",
                 0.45,
-                f"Bullish HTF (M1), but Tick RSI ({tick_rsi:.1f}) is elevated (>68). Waiting for dip.",
+                f"{align_desc}, but Tick RSI ({tick_rsi:.1f}) is elevated (>68). Waiting for dip.",
             )
-        elif tick_rsi <= 45.0 and down_ticks >= 1:
-            # High-conviction pullback entry in an uptrend
+        elif tick_rsi <= 45.0 and (down_ticks >= 1 or is_higher_low):
+            # High-conviction structural pullback entry in an uptrend
+            conv = 0.88 if dual_htf_aligned else 0.85
             return (
                 "CALL",
-                0.85,
-                f"Bullish HTF alignment + Deep dip pullback entry (RSI {tick_rsi:.1f} <= 45, {down_ticks} down ticks into support)",
+                conv,
+                f"{align_desc} + Deep dip structural entry (RSI {tick_rsi:.1f} <= 45, support confirmed)",
             )
         elif (is_uptrend or up_ticks >= 2) and tick_rsi <= 55.0:
+            conv = 0.85 if dual_htf_aligned else 0.80
             return (
                 "CALL",
-                0.80,
-                f"Bullish HTF continuation (EMA5 > EMA15, RSI {tick_rsi:.1f} <= 55)",
+                conv,
+                f"{align_desc} continuation (EMA5 > EMA15, RSI {tick_rsi:.1f} <= 55)",
             )
         else:
             return (
                 "CALL",
                 0.60,
-                f"Bullish HTF bias but awaiting cleaner dip (RSI {tick_rsi:.1f})",
+                f"{align_desc} bias but awaiting cleaner dip (RSI {tick_rsi:.1f})",
             )
 
     elif htf_trend == "BEARISH":
         # In a bearish HTF trend: ONLY allow PUT options (ban counter-trend CALLs)
+        align_desc = "Dual HTF (M5+M1) Consensus" if dual_htf_aligned else "Bearish HTF (M1)"
         if tick_rsi < 30.0:
             return (
                 "PUT",
                 0.45,
-                f"Bearish HTF (M1), but Tick RSI ({tick_rsi:.1f}) is oversold (<30). Waiting for bounce.",
+                f"{align_desc}, but Tick RSI ({tick_rsi:.1f}) is oversold (<30). Waiting for bounce.",
             )
-        elif tick_rsi >= 45.0 and up_ticks >= 1:
-            # High-conviction bounce fade in a downtrend
+        elif tick_rsi >= 45.0 and (up_ticks >= 1 or is_lower_high):
+            # High-conviction structural bounce fade in a downtrend
+            conv = 0.88 if dual_htf_aligned else 0.85
             return (
                 "PUT",
-                0.85,
-                f"Bearish HTF alignment + Bounce fade entry (RSI {tick_rsi:.1f}, {up_ticks} up ticks into resistance)",
+                conv,
+                f"{align_desc} + Bounce fade structural entry (RSI {tick_rsi:.1f}, resistance confirmed)",
             )
         elif is_downtrend or down_ticks >= 2:
+            conv = 0.85 if dual_htf_aligned else 0.80
             return (
                 "PUT",
-                0.80,
-                f"Bearish HTF continuation (EMA5 < EMA15, RSI {tick_rsi:.1f})",
+                conv,
+                f"{align_desc} continuation (EMA5 < EMA15, RSI {tick_rsi:.1f})",
             )
         else:
             return (
                 "PUT",
                 0.72,
-                f"Bearish HTF bias (RSI {tick_rsi:.1f})",
+                f"{align_desc} bias (RSI {tick_rsi:.1f})",
             )
 
     # 4. Fallback / Neutral HTF Mode (Direct micro-trend & RSI boundary evaluation)
@@ -338,14 +351,36 @@ async def determine_contract_direction(
 
     # Fetch Higher-Timeframe trend if enabled
     htf_trend = "NEUTRAL"
+    dual_htf_aligned = False
     if getattr(config, "DBOT_USE_HTF_FILTER", True):
-        candles = await fetch_htf_candles(
+        candles_m1 = await fetch_htf_candles(
             symbol,
             count=60,
             granularity=getattr(config, "DBOT_HTF_TIMEFRAME_S", 60),
         )
-        if candles:
-            htf_trend, _, _ = evaluate_htf_trend(candles)
+        if candles_m1:
+            m1_trend, _, _ = evaluate_htf_trend(candles_m1)
+            htf_trend = m1_trend
+
+            # Dual-HTF Consensus check (M1 + M5 macro trend)
+            if getattr(config, "DBOT_USE_DUAL_HTF", True):
+                candles_m5 = await fetch_htf_candles(
+                    symbol,
+                    count=40,
+                    granularity=getattr(config, "DBOT_MACRO_TIMEFRAME_S", 300),
+                )
+                if candles_m5:
+                    m5_trend, _, _ = evaluate_htf_trend(candles_m5)
+                    if m1_trend == "BULLISH" and m5_trend == "BULLISH":
+                        htf_trend = "BULLISH"
+                        dual_htf_aligned = True
+                    elif m1_trend == "BEARISH" and m5_trend == "BEARISH":
+                        htf_trend = "BEARISH"
+                        dual_htf_aligned = True
+                    elif m1_trend != m5_trend and m5_trend != "NEUTRAL":
+                        # M1 and M5 in active conflict: neutralize to prevent trap entries
+                        htf_trend = "NEUTRAL"
+                        dual_htf_aligned = False
 
     # Compute Tick RSI
     tick_rsi = _calculate_rsi(ticks, period=getattr(config, "DBOT_RSI_PERIOD", 14))
@@ -356,4 +391,5 @@ async def determine_contract_direction(
         preferred_default=preferred_default,
         htf_trend=htf_trend,
         tick_rsi=tick_rsi,
+        dual_htf_aligned=dual_htf_aligned,
     )

@@ -94,6 +94,25 @@ class TestDirectionEngine(unittest.TestCase):
         self.assertEqual(direction, "PUT")
         self.assertEqual(conviction, 0.50)
 
+    def test_dual_htf_consensus_boost(self):
+        prices = [1210.0 + (i % 2) * 0.1 for i in range(25)]
+        dir_res, conv_res, rationale = evaluate_tick_bias(
+            prices,
+            htf_trend="BULLISH",
+            tick_rsi=40.0,
+            dual_htf_aligned=True,
+        )
+        self.assertEqual(dir_res, "CALL")
+        self.assertGreaterEqual(conv_res, 0.88)
+        self.assertIn("Dual HTF", rationale)
+
+    def test_chop_filter_early_defense(self):
+        # Build flat series where fast ATR collapses relative to slow ATR
+        prices = [100.0 + (i * 0.5) for i in range(20)] + [110.0, 110.01, 110.0, 110.01, 110.0, 110.01, 110.0]
+        dir_res, conv_res, rationale = evaluate_tick_bias(prices, preferred_default="PUT")
+        self.assertLess(conv_res, 0.50)
+        self.assertIn("Volatility Squeeze / Dead Chop", rationale)
+
 
 class TestDBotEngine(unittest.TestCase):
     def setUp(self):
@@ -290,6 +309,47 @@ class TestDBotEngine(unittest.TestCase):
                     self.assertEqual(row[4], "2.0")
                     self.assertEqual(row[6], "1.8")
                     self.assertEqual(row[7], "WON")
+
+    @patch("modules.dbot_engine.DBotEngine.refresh_balance", new_callable=AsyncMock)
+    @patch("modules.dbot_engine.DBotEngine.get_proposal", new_callable=AsyncMock)
+    @patch("modules.dbot_engine.DBotEngine.buy_contract", new_callable=AsyncMock)
+    @patch("modules.dbot_engine.DBotEngine.wait_for_settlement", new_callable=AsyncMock)
+    def test_conviction_staking_strategy(self, mock_settle, mock_buy, mock_prop, mock_bal):
+        """Validates Conviction-based sizing: $3 on >=85% conviction, $2 baseline, never scale on loss."""
+        conv_engine = DBotEngine(
+            staking_strategy="CONVICTION",
+            base_stake=2.0,
+            conviction_high_stake=3.0,
+            conviction_threshold_high=0.85,
+            direction_mode="PUT",
+            persist_session=False,
+            use_streaming=False,
+            continuous_mode=False,
+        )
+        mock_bal.return_value = 1000.0
+
+        # Trade 1: High conviction (90%) -> should use elevated stake of $3.00
+        with patch("modules.dbot_engine.determine_contract_direction", new_callable=AsyncMock) as mock_dir:
+            mock_dir.return_value = ("PUT", 0.90, "Dual HTF consensus")
+            mock_prop.return_value = {"id": "c1", "ask_price": 3.0, "payout": 5.6}
+            mock_buy.return_value = {"contract_id": 3001, "buy_price": 3.0}
+            mock_settle.return_value = {"status": "lost", "profit": -3.0, "entry_spot": 100.0, "exit_tick": 101.0}
+
+            asyncio.run(conv_engine.execute_trade_cycle())
+            # After a loss: MUST reset to base stake $2.00 (Anti-Gambler's Fallacy)
+            self.assertEqual(conv_engine.current_stake, 2.0)
+            self.assertEqual(conv_engine.consecutive_losses, 1)
+
+        # Trade 2: Even with high conviction, if coming off a loss, keeps risk protected at base $2.00
+        with patch("modules.dbot_engine.determine_contract_direction", new_callable=AsyncMock) as mock_dir:
+            mock_dir.return_value = ("PUT", 0.90, "Dual HTF consensus")
+            mock_prop.return_value = {"id": "c2", "ask_price": 2.0, "payout": 3.7}
+            mock_buy.return_value = {"contract_id": 3002, "buy_price": 2.0}
+            mock_settle.return_value = {"status": "won", "profit": 1.7, "entry_spot": 100.0, "exit_tick": 99.0}
+
+            asyncio.run(conv_engine.execute_trade_cycle())
+            self.assertEqual(conv_engine.consecutive_losses, 0)
+            self.assertEqual(conv_engine.current_stake, 2.0)
 
     @patch("modules.dbot_engine.DBotEngine.refresh_balance", new_callable=AsyncMock)
     @patch("modules.dbot_engine.DBotEngine.get_proposal", new_callable=AsyncMock)

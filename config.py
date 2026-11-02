@@ -152,9 +152,12 @@ DBOT_CONTRACT_TYPE          = os.getenv("DBOT_CONTRACT_TYPE", "PUT").upper()    
 DBOT_DURATION               = int(os.getenv("DBOT_DURATION", "60"))              # 60s (1m) duration allows directional momentum to travel
 DBOT_DURATION_UNIT          = os.getenv("DBOT_DURATION_UNIT", "s")               # "s" for seconds ("t" for ticks)
 
-# Staking strategy: "DALEMBERT" (Recommended unit step: +$1 on loss, -$1 on win), "MARTINGALE", or "FLAT"
-DBOT_STAKING_STRATEGY       = os.getenv("DBOT_STAKING_STRATEGY", "DALEMBERT").upper()
+# Staking strategy: "CONVICTION" (Recommended: $2 base, $3 on high-conviction + dual HTF, flat on loss),
+#                   "DALEMBERT" (Unit step: +$1 on loss, -$1 on win), "MARTINGALE", or "FLAT"
+DBOT_STAKING_STRATEGY       = os.getenv("DBOT_STAKING_STRATEGY", "CONVICTION").upper()
 DBOT_BASE_STAKE             = float(os.getenv("DBOT_BASE_STAKE", "2.0"))         # Base / Floor stake ($2.00)
+DBOT_CONVICTION_HIGH_STAKE  = float(os.getenv("DBOT_CONVICTION_HIGH_STAKE", "3.0")) # Stake size on >=85% conviction ($3.00)
+DBOT_CONVICTION_THRESHOLD_HIGH = float(os.getenv("DBOT_CONVICTION_THRESHOLD_HIGH", "0.85")) # Conviction cutoff for high stake
 DBOT_DALEMBERT_UNIT         = float(os.getenv("DBOT_DALEMBERT_UNIT", "1.0"))     # D'Alembert step unit (+$1.00 / -$1.00)
 DBOT_MARTINGALE_MULTIPLIER  = float(os.getenv("DBOT_MARTINGALE_MULTIPLIER", "2.0")) # Multiplier on loss (2.0x) if using Martingale
 DBOT_MAX_LOSS_STREAK        = int(os.getenv("DBOT_MAX_LOSS_STREAK", "4"))        # Max consecutive losses before resetting stake
@@ -172,10 +175,13 @@ DBOT_INTER_TRADE_DELAY_S    = float(os.getenv("DBOT_INTER_TRADE_DELAY_S", "25.0"
 DBOT_MIN_CONVICTION         = float(os.getenv("DBOT_MIN_CONVICTION", "0.75"))    # Strict entry trigger: raised to 75% conviction
 DBOT_VETO_RETRY_DELAY_S     = float(os.getenv("DBOT_VETO_RETRY_DELAY_S", "5.0"))  # Seconds to wait when signal is vetoed before checking next tick setup
 DBOT_HTF_TIMEFRAME_S        = int(os.getenv("DBOT_HTF_TIMEFRAME_S", "60"))       # 60s (M1) HTF trend filter
+DBOT_MACRO_TIMEFRAME_S      = int(os.getenv("DBOT_MACRO_TIMEFRAME_S", "300"))     # 300s (M5) Macro trend filter
 DBOT_USE_HTF_FILTER         = os.getenv("DBOT_USE_HTF_FILTER", "true").lower() == "true"
+DBOT_USE_DUAL_HTF           = os.getenv("DBOT_USE_DUAL_HTF", "true").lower() == "true" # Dual M1 + M5 consensus
 DBOT_USE_RSI_FILTER         = os.getenv("DBOT_USE_RSI_FILTER", "true").lower() == "true"
 DBOT_RSI_PERIOD             = int(os.getenv("DBOT_RSI_PERIOD", "14"))
 DBOT_USE_CHOP_FILTER        = os.getenv("DBOT_USE_CHOP_FILTER", "true").lower() == "true"
+DBOT_CHOP_RATIO             = float(os.getenv("DBOT_CHOP_RATIO", "0.75"))        # Raised from 0.65 to 0.75 for early chop defense
 DBOT_PERSIST_SESSION        = os.getenv("DBOT_PERSIST_SESSION", "true").lower() == "true" # Resilient session persistence on disk
 DBOT_USE_STREAMING          = os.getenv("DBOT_USE_STREAMING", "true").lower() == "true"   # Real-time WebSocket streaming settlement
 DBOT_CONTINUOUS_MODE        = os.getenv("DBOT_CONTINUOUS_MODE", "true").lower() == "true" # Continuous automated cycles (user preference)
