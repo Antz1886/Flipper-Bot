@@ -360,26 +360,38 @@ async def run_smc():
 
 
 async def run_dbot():
-    """Runs the Inbuilt Deriv Bot (DBot) continuous execution engine."""
-    success = await connector.initialize()
-    if not success:
-        log.error("Failed to connect or authorize with Deriv API for DBot execution.")
-        return
-
+    """Runs the Inbuilt Deriv Bot (DBot) continuous execution engine with auto-recovery."""
     if "--dry-run" in sys.argv:
+        success = await connector.initialize()
+        if not success:
+            log.error("Failed to connect or authorize with Deriv API for DBot execution.")
+            return
         log.info("🧪 [DRY RUN] DBot engine initialized and connection verified successfully. Exiting.")
         await connector.shutdown()
         return
 
-    engine = DBotEngine()
-    try:
-        await engine.run()
-    except KeyboardInterrupt:
-        log.info("DBot shutdown requested by user.")
-    except Exception as e:
-        log.error(f"Unexpected error in DBot session: {e}", exc_info=True)
-    finally:
-        await connector.shutdown()
+    while True:
+        try:
+            success = await connector.initialize()
+            if not success:
+                log.warning("Initial Deriv connection attempt unsuccessful. Retrying in 15s...")
+                await asyncio.sleep(15.0)
+                continue
+
+            engine = DBotEngine()
+            await engine.run()
+
+            # If user stopped bot or non-continuous session completed
+            if not getattr(engine, "continuous_mode", True) or not engine.is_running:
+                break
+        except KeyboardInterrupt:
+            log.info("DBot shutdown requested by user.")
+            break
+        except Exception as e:
+            log.error(f"Unexpected error in DBot session: {e}. Auto-recovering in 15s...", exc_info=True)
+            await asyncio.sleep(15.0)
+        finally:
+            await connector.shutdown()
 
 
 async def main():

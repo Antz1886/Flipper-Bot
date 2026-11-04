@@ -234,22 +234,26 @@ class DBotEngine:
         log.info("=" * 80)
 
     async def _ensure_connection(self):
-        """Verify API is connected and authorized; reconnect if necessary."""
-        api = connector.get_api()
-        if not api or not api.is_active or not api.authorized:
-            log.warning("Deriv API session disconnected or unauthorized. Re-establishing connection...")
+        """Verify API is connected and authorized; reconnect if necessary with persistent retries."""
+        for attempt in range(1, 10):
+            api = connector.get_api()
+            if api and api.is_active and api.authorized:
+                return api
+            log.warning(f"Deriv API session disconnected or unauthorized. Re-establishing connection (attempt {attempt}/10)...")
             success = await connector.ensure_connected()
             if not success:
                 success = await connector.reconnect()
-            if not success:
-                raise ConnectionError("Failed to reconnect to Deriv WebSocket API.")
-            api = connector.get_api()
-        return api
+            if success:
+                api = connector.get_api()
+                if api and api.is_active and api.authorized:
+                    return api
+            await asyncio.sleep(min(attempt * 3.0, 30.0))
+        raise ConnectionError("Failed to reconnect to Deriv WebSocket API after 10 attempts.")
 
     async def refresh_balance(self) -> float:
         """Fetch current balance from Deriv."""
-        api = await self._ensure_connection()
         try:
+            api = await self._ensure_connection()
             resp = await api.send({"balance": 1})
             bal = float(resp.get("balance", {}).get("balance", 0.0))
             self.current_balance = bal
