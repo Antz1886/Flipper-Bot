@@ -12,6 +12,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the requirements file into the container
@@ -22,6 +23,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application code
 COPY . .
+
+# Install TradingAgents
+RUN if [ -f "TradingAgents/pyproject.toml" ]; then pip install --no-cache-dir -e ./TradingAgents; fi
 
 # Create the data and logs directories if they don't exist
 RUN mkdir -p data logs models
