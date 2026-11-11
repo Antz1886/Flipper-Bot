@@ -18,14 +18,18 @@ RUN apt-get update && apt-get install -y \
 # Copy the requirements file into the container
 COPY requirements.txt .
 
-# Install Python dependencies
+# Install base Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
+# Copy the application code
 COPY . .
 
-# Install TradingAgents
-RUN if [ -f "TradingAgents/pyproject.toml" ]; then pip install --no-cache-dir -e ./TradingAgents; fi
+# Ensure TradingAgents is present and fully installed; auto-clone if submodule was not initialized on host
+RUN if [ ! -f "TradingAgents/pyproject.toml" ]; then \
+        rm -rf TradingAgents && \
+        git clone --depth 1 https://github.com/TauricResearch/TradingAgents.git TradingAgents; \
+    fi && \
+    pip install --no-cache-dir -e ./TradingAgents
 
 # Create the data and logs directories if they don't exist
 RUN mkdir -p data logs models
