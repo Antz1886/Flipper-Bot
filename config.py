@@ -195,7 +195,7 @@ DBOT_CONTINUOUS_MODE        = os.getenv("DBOT_CONTINUOUS_MODE", "true").lower() 
 
 # ─── Multi-Agent AI Pre-Trade Gatekeeper (TradingAgents Integration) ───────────
 AI_TRADE_FILTER_ENABLED     = os.getenv("AI_TRADE_FILTER_ENABLED", "true").lower() == "true"
-AI_FILTER_MODEL             = os.getenv("AI_FILTER_MODEL", "gemini-3.8-flash")
+AI_FILTER_MODEL             = os.getenv("AI_FILTER_MODEL", "gemini-2.5-flash")
 AI_FILTER_CACHE_TTL_S       = float(os.getenv("AI_FILTER_CACHE_TTL_S", "45.0"))
 AI_FILTER_MIN_CONVICTION    = float(os.getenv("AI_FILTER_MIN_CONVICTION", "0.75"))
 

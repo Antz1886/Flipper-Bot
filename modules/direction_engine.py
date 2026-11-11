@@ -335,61 +335,62 @@ def evaluate_tick_bias(
 
     # 6. Neutral HTF Mode: Statistical Mean-Reversion & Confirmed Micro-Impulses
     # 6A. High-Edge Mean Reversion Extremes (Statistical boundaries of PRNG synthetic indices)
-    if (z_score >= 1.8 or current_price >= upper_bb) and (tick_rsi >= 68.0 or last_tick_down):
+    # Require confirmed tick reversal (down-tick for PUT / up-tick for CALL) to avoid catching falling knives
+    if (z_score >= 2.0 or (current_price >= upper_bb and z_score >= 1.8)) and tick_rsi >= 70.0 and last_tick_down and down_ticks >= 1:
         return (
             "PUT",
             0.88,
-            f"Overbought micro-mean-reversion fade (Z {z_score:+.2f} >= 1.8, RSI {tick_rsi:.1f})",
+            f"Overbought confirmed statistical reversal (Z {z_score:+.2f} >= 2.0, RSI {tick_rsi:.1f}, tick reversal confirmed)",
         )
-    elif (z_score <= -1.8 or current_price <= lower_bb) and (tick_rsi <= 32.0 or last_tick_up):
+    elif (z_score <= -2.0 or (current_price <= lower_bb and z_score <= -1.8)) and tick_rsi <= 30.0 and last_tick_up and up_ticks >= 1:
         return (
             "CALL",
             0.88,
-            f"Oversold micro-mean-reversion bounce (Z {z_score:+.2f} <= -1.8, RSI {tick_rsi:.1f})",
+            f"Oversold confirmed statistical reversal (Z {z_score:+.2f} <= -2.0, RSI {tick_rsi:.1f}, tick reversal confirmed)",
         )
 
     # 6B. Exhaustion Pullbacks & Impulses in Micro-Trend
-    is_bearish_exhaustion = is_downtrend and up_ticks >= 2
-    is_bearish_impulse = is_downtrend and down_ticks >= 2
-    is_bullish_exhaustion = is_uptrend and down_ticks >= 2
-    is_bullish_impulse = is_uptrend and up_ticks >= 2
+    is_bearish_exhaustion = is_downtrend and up_ticks >= 2 and last_tick_down
+    is_bearish_impulse = is_downtrend and down_ticks >= 2 and er >= er_threshold
+    is_bullish_exhaustion = is_uptrend and down_ticks >= 2 and last_tick_up
+    is_bullish_impulse = is_uptrend and up_ticks >= 2 and er >= er_threshold
 
     if is_bearish_exhaustion:
         direction = "PUT"
-        conviction = 0.85
-        rationale = f"Bearish micro-trend (EMA5 {ema_fast:.2f} < EMA15 {ema_slow:.2f}) with exhaustion pullback ({up_ticks} up ticks)"
+        conviction = 0.88
+        rationale = f"Bearish micro-trend (EMA5 {ema_fast:.2f} < EMA15 {ema_slow:.2f}) with exhaustion pullback ({up_ticks} up ticks + down reversal)"
     elif is_bearish_impulse:
         direction = "PUT"
-        conviction = 0.82 if er >= er_threshold else 0.70
-        rationale = f"Bearish impulse continuation (EMA5 < EMA15, {down_ticks}/3 down ticks, ER {er:.2f})"
+        conviction = 0.84
+        rationale = f"Bearish impulse continuation (EMA5 < EMA15, {down_ticks}/3 down ticks, ER {er:.2f} >= {er_threshold})"
     elif is_bullish_exhaustion:
         direction = "CALL"
-        conviction = 0.85
-        rationale = f"Bullish micro-trend (EMA5 {ema_fast:.2f} > EMA15 {ema_slow:.2f}) with exhaustion pullback ({down_ticks} down ticks)"
+        conviction = 0.88
+        rationale = f"Bullish micro-trend (EMA5 {ema_fast:.2f} > EMA15 {ema_slow:.2f}) with exhaustion pullback ({down_ticks} down ticks + up reversal)"
     elif is_bullish_impulse:
         direction = "CALL"
-        conviction = 0.82 if er >= er_threshold else 0.70
-        rationale = f"Bullish impulse continuation (EMA5 > EMA15, {up_ticks}/3 up ticks, ER {er:.2f})"
+        conviction = 0.84
+        rationale = f"Bullish impulse continuation (EMA5 > EMA15, {up_ticks}/3 up ticks, ER {er:.2f} >= {er_threshold})"
     elif tick_rsi < 30.0:
         direction = "CALL"
-        conviction = 0.75
-        rationale = f"Oversold micro-mean-reversion bounce (RSI {tick_rsi:.1f} < 30)"
+        conviction = 0.50
+        rationale = f"Oversold bounce watch (RSI {tick_rsi:.1f} < 30); awaiting structural confirmation"
     elif tick_rsi > 70.0:
         direction = "PUT"
-        conviction = 0.75
-        rationale = f"Overbought micro-mean-reversion fade (RSI {tick_rsi:.1f} > 70)"
+        conviction = 0.50
+        rationale = f"Overbought fade watch (RSI {tick_rsi:.1f} > 70); awaiting structural confirmation"
     elif is_downtrend:
         direction = "PUT"
-        conviction = 0.65
-        rationale = "Bearish EMA alignment (EMA5 < EMA15)"
+        conviction = 0.60
+        rationale = "Bearish EMA alignment (EMA5 < EMA15); awaiting pullback entry"
     elif is_uptrend:
         direction = "CALL"
-        conviction = 0.65
-        rationale = "Bullish EMA alignment (EMA5 > EMA15)"
+        conviction = 0.60
+        rationale = "Bullish EMA alignment (EMA5 > EMA15); awaiting dip entry"
     else:
         direction = preferred_default
-        conviction = 0.50
-        rationale = f"Compression/Range-bound ticks (RSI {tick_rsi:.1f}, ER {er:.2f}); defaulting to {preferred_default}"
+        conviction = 0.30
+        rationale = f"Compression/Range-bound noise (RSI {tick_rsi:.1f}, ER {er:.2f}); sitting out (no trend edge)"
 
     # Streak Mitigation: Require higher conviction if in a loss streak
     if consecutive_losses >= 1:

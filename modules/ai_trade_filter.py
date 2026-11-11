@@ -6,6 +6,7 @@ Integrates TradingAgents & Google Gemini with Flipper-Bot:
 - Graceful degradation: falls back seamlessly if API limits or network timeouts occur.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -51,7 +52,7 @@ class AITradeFilter:
     ):
         self.enabled = enabled
         self.cache_ttl_s = cache_ttl_s
-        self.model_name = model_name or getattr(config, "AI_FILTER_MODEL", "gemini-3.8-flash")
+        self.model_name = model_name or getattr(config, "AI_FILTER_MODEL", "gemini-2.5-flash")
         self._llm = None
         self._cache: Dict[str, Tuple[float, bool, float, str]] = {}  # key -> (timestamp, approved, confidence, reason)
 
@@ -128,7 +129,8 @@ class AITradeFilter:
                 SystemMessage(content=_SYSTEM_PROMPT),
                 HumanMessage(content=user_prompt),
             ]
-            response = await llm.ainvoke(messages)
+            # Enforce 6.0s timeout to protect tick-level execution timing
+            response = await asyncio.wait_for(llm.ainvoke(messages), timeout=6.0)
             response = normalize_content(response)
             raw_content = response.content if hasattr(response, "content") else str(response)
             cleaned = self._clean_json(raw_content)
@@ -156,7 +158,7 @@ def get_ai_trade_filter() -> AITradeFilter:
     global _filter_instance
     if _filter_instance is None:
         enabled = getattr(config, "AI_TRADE_FILTER_ENABLED", True)
-        model = getattr(config, "AI_FILTER_MODEL", "gemini-3.8-flash")
+        model = getattr(config, "AI_FILTER_MODEL", "gemini-2.5-flash")
         ttl = float(getattr(config, "AI_FILTER_CACHE_TTL_S", 45.0))
         _filter_instance = AITradeFilter(model_name=model, cache_ttl_s=ttl, enabled=enabled)
     return _filter_instance
