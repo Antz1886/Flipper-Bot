@@ -60,6 +60,7 @@ from modules.trade_learner import (
     TradeContext,
     get_session_phase,
 )
+from modules.ai_trade_filter import get_ai_trade_filter
 from modules.dbot_engine import DBotEngine
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -264,6 +265,27 @@ async def run_smc():
                     if not approved:
                         log.warning(f"🛑 [META-LEARNER VETO] {symbol} {signal.direction}: {veto_reason}")
                         continue
+
+                    # 12B. Multi-Agent AI Pre-Trade Gatekeeper (TradingAgents + Gemini)
+                    if getattr(config, "AI_TRADE_FILTER_ENABLED", True):
+                        ai_filter = get_ai_trade_filter()
+                        ai_ctx = {
+                            "rationale": f"SMC {signal.direction} setup with pool {signal.macro_pool_desc}, displacement {signal.displacement_ratio:.2f} ATR",
+                            "htf_trend": "BULLISH" if signal.direction == "BUY" else "BEARISH",
+                            "dual_htf_aligned": True,
+                        }
+                        ai_ok, ai_conf, ai_why = await ai_filter.validate_trade(
+                            symbol=symbol,
+                            proposed_direction=signal.direction,
+                            conviction=conviction_score,
+                            context=ai_ctx,
+                            stake=config.MIN_STAKE_USD,
+                        )
+                        if not ai_ok:
+                            log.warning(f"🛡️ [AI GATEKEEPER VETO] {symbol} {signal.direction} blocked by AI: {ai_why}")
+                            continue
+                        else:
+                            log.info(f"🤖 [AI GATEKEEPER APPROVED] {symbol} {signal.direction} ({ai_conf*100:.0f}% AI conf) | {ai_why}")
 
                     # 13. Self-Healing Defensive Risk Throttling (cuts risk 50% on loss streaks)
                     effective_risk_pct = self_healer.get_effective_risk_pct(recommended_risk)

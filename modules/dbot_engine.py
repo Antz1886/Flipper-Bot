@@ -20,6 +20,7 @@ import config
 from modules import connector
 from modules.direction_engine import determine_contract_direction
 from modules.session_state import SessionStateManager
+from modules.ai_trade_filter import get_ai_trade_filter
 
 log = logging.getLogger("dbot_engine")
 
@@ -72,6 +73,7 @@ class DBotEngine:
         self.persist_session = persist_session
         self.use_streaming = use_streaming
         self.continuous_mode = continuous_mode
+        self.ai_filter = get_ai_trade_filter()
         self.cycle_count: int = 1
 
         # Institutional Daily Risk Governor (Quant-Validated $50 Daily Envelope)
@@ -232,6 +234,7 @@ class DBotEngine:
         log.info(f"   Session Persistence : {'Active (data/dbot_session.json)' if self.persist_session else 'Disabled'}")
         log.info(f"   Inter-Trade Delay   : {self.inter_trade_delay}s")
         log.info(f"   Execution Mode      : {'Continuous Testing (Auto-Roll Cycles)' if self.continuous_mode else 'Standard Session (Halts on Target)'}")
+        log.info(f"   AI Gatekeeper       : {'Active (' + getattr(config, 'AI_FILTER_MODEL', 'gemini-3.8-flash') + ')' if getattr(config, 'AI_TRADE_FILTER_ENABLED', True) else 'Disabled'}")
         log.info(f"   Account Mode        : {'DEMO' if getattr(config, 'DEMO_MODE', True) else 'REAL'}")
         log.info("=" * 80)
 
@@ -588,6 +591,35 @@ class DBotEngine:
         else:
             stake_to_use = min(round(self.current_stake, 2), self.max_stake)
             sizing_label = self.staking_strategy
+
+        # Multi-Agent AI Pre-Trade Gatekeeper (TradingAgents + Gemini)
+        if getattr(config, "AI_TRADE_FILTER_ENABLED", True):
+            ctx = {
+                "rationale": rationale,
+                "htf_trend": "BULLISH" if "Bullish" in rationale else ("BEARISH" if "Bearish" in rationale else "NEUTRAL"),
+                "dual_htf_aligned": "Dual HTF" in rationale,
+            }
+            ai_approved, ai_conf, ai_reason = await self.ai_filter.validate_trade(
+                symbol=self.symbol,
+                proposed_direction=chosen_dir,
+                conviction=conviction,
+                context=ctx,
+                stake=stake_to_use,
+            )
+            if not ai_approved:
+                log.warning(
+                    f"🛡️ [AI GATEKEEPER VETO] {self.symbol} {chosen_dir} ({conviction*100:.0f}% quant) blocked. "
+                    f"Reason: {ai_reason}"
+                )
+                veto_delay = getattr(config, "DBOT_VETO_RETRY_DELAY_S", 5.0)
+                if veto_delay > 0:
+                    await asyncio.sleep(veto_delay)
+                return True
+            else:
+                log.info(
+                    f"🤖 [AI GATEKEEPER APPROVED] {self.symbol} {chosen_dir} "
+                    f"({ai_conf*100:.0f}% AI conf) | {ai_reason}"
+                )
 
         # Pre-execution balance sufficiency check
         current_bal = await self.refresh_balance()

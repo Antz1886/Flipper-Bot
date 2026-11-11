@@ -193,6 +193,12 @@ DBOT_PERSIST_SESSION        = os.getenv("DBOT_PERSIST_SESSION", "true").lower() 
 DBOT_USE_STREAMING          = os.getenv("DBOT_USE_STREAMING", "true").lower() == "true"   # Real-time WebSocket streaming settlement
 DBOT_CONTINUOUS_MODE        = os.getenv("DBOT_CONTINUOUS_MODE", "true").lower() == "true" # Continuous automated cycles (user preference)
 
+# ─── Multi-Agent AI Pre-Trade Gatekeeper (TradingAgents Integration) ───────────
+AI_TRADE_FILTER_ENABLED     = os.getenv("AI_TRADE_FILTER_ENABLED", "true").lower() == "true"
+AI_FILTER_MODEL             = os.getenv("AI_FILTER_MODEL", "gemini-3.8-flash")
+AI_FILTER_CACHE_TTL_S       = float(os.getenv("AI_FILTER_CACHE_TTL_S", "45.0"))
+AI_FILTER_MIN_CONVICTION    = float(os.getenv("AI_FILTER_MIN_CONVICTION", "0.75"))
+
 SCAN_INTERVAL_S = 15     # Scan cycle interval in seconds
 MAX_RETRIES     = 3
 RETRY_DELAY_S   = 2
