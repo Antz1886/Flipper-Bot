@@ -15,3 +15,4 @@ bot.pid
 logs/
 trades.csv
 !trades.csv.template
+TradingAgents/

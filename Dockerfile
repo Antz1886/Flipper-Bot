@@ -16,18 +16,19 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the requirements file into the container
+# Copy requirements
 COPY requirements.txt .
 
-# Install all Python dependencies
+# Install all Python dependencies from requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Clone and install TradingAgents framework
-RUN git clone --depth 1 https://github.com/TauricResearch/TradingAgents.git /app/TradingAgents && \
-    pip install --no-cache-dir -e /app/TradingAgents
-
-# Copy the rest of the application code
+# Copy application code (TradingAgents is excluded via .dockerignore)
 COPY . .
+
+# Clone and install TradingAgents cleanly
+RUN rm -rf /app/TradingAgents && \
+    git clone --depth 1 https://github.com/TauricResearch/TradingAgents.git /app/TradingAgents && \
+    pip install --no-cache-dir -e /app/TradingAgents
 
 # Create data, logs, and models directories
 RUN mkdir -p data logs models
