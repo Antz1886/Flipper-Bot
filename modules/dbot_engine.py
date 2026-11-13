@@ -76,11 +76,11 @@ class DBotEngine:
         self.ai_filter = get_ai_trade_filter()
         self.cycle_count: int = 1
 
-        # Institutional Daily Risk Governor (Quant-Validated $50 Daily Envelope)
-        self.enforce_daily_limits: bool = getattr(config, "DBOT_ENFORCE_DAILY_LIMITS", True)
-        self.daily_max_stake_usd: float = float(getattr(config, "DBOT_DAILY_MAX_STAKE_USD", 50.0))
-        self.daily_stop_loss_usd: float = float(getattr(config, "DBOT_DAILY_STOP_LOSS_USD", 50.0))
-        self.daily_take_profit_usd: float = float(getattr(config, "DBOT_DAILY_TAKE_PROFIT_USD", 50.0))
+        # Institutional Daily Risk Governor (Optional Daily Cap; Disabled by Default for Unlimited Trading)
+        self.enforce_daily_limits: bool = getattr(config, "DBOT_ENFORCE_DAILY_LIMITS", False)
+        self.daily_max_stake_usd: float = float(getattr(config, "DBOT_DAILY_MAX_STAKE_USD", 0.0))
+        self.daily_stop_loss_usd: float = float(getattr(config, "DBOT_DAILY_STOP_LOSS_USD", 0.0))
+        self.daily_take_profit_usd: float = float(getattr(config, "DBOT_DAILY_TAKE_PROFIT_USD", 0.0))
 
         # Intraday Tracking
         self.daily_date_utc: str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -230,6 +230,8 @@ class DBotEngine:
             log.info(f"   Daily Stop Loss     : -${self.daily_stop_loss_usd:.2f} USD (Hard Daily Loss Ceiling)")
             log.info(f"   Daily Take Profit   : +${self.daily_take_profit_usd:.2f} USD (Daily Profit Locked)")
             log.info(f"   Daily Progress      : ${self.daily_net_pnl:+.2f} USD (${self.daily_staked_total:.2f} staked)")
+        else:
+            log.info("   Daily Limits        : Disabled (Unlimited Trading Active)")
         log.info(f"   Streaming Execution : {'Real-Time WebSocket' if self.use_streaming else 'Polling (0.8s)'}")
         log.info(f"   Session Persistence : {'Active (data/dbot_session.json)' if self.persist_session else 'Disabled'}")
         log.info(f"   Inter-Trade Delay   : {self.inter_trade_delay}s")
@@ -456,7 +458,7 @@ class DBotEngine:
         # Daily UTC Rollover Check
         self._check_and_roll_daily_utc()
 
-        # Institutional Daily Risk Governor Checks ($50 Daily Envelope)
+        # Institutional Daily Risk Governor Checks (Optional, Disabled for Unlimited Trading)
         if self.enforce_daily_limits:
             if self.daily_net_pnl <= -self.daily_stop_loss_usd and self.daily_stop_loss_usd > 0:
                 await self._wait_for_next_utc_day(

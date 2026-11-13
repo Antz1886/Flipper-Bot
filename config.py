@@ -167,11 +167,11 @@ DBOT_MAX_STAKE              = float(os.getenv("DBOT_MAX_STAKE", "5.0"))         
 DBOT_TAKE_PROFIT_USD        = float(os.getenv("DBOT_TAKE_PROFIT_USD", "30.0"))    # Cycle take profit target ($30.00)
 DBOT_STOP_LOSS_USD          = float(os.getenv("DBOT_STOP_LOSS_USD", "30.0"))      # Cumulative stop loss threshold ($30.00)
 
-# Institutional Daily Risk Governor (Quant-Validated Capital Envelope)
-DBOT_ENFORCE_DAILY_LIMITS    = os.getenv("DBOT_ENFORCE_DAILY_LIMITS", "true").lower() == "true"
-DBOT_DAILY_MAX_STAKE_USD     = float(os.getenv("DBOT_DAILY_MAX_STAKE_USD", "40.0"))    # Maximum cumulative stakes per calendar day
-DBOT_DAILY_STOP_LOSS_USD     = float(os.getenv("DBOT_DAILY_STOP_LOSS_USD", "20.0"))    # Hard daily stop loss ($20.00 max daily net loss)
-DBOT_DAILY_TAKE_PROFIT_USD   = float(os.getenv("DBOT_DAILY_TAKE_PROFIT_USD", "25.0"))  # Hard daily take profit ($25.00 daily profit target banked)
+# Institutional Daily Risk Governor (Optional Daily Cap; Disabled by Default for Unlimited Continuous Trading)
+DBOT_ENFORCE_DAILY_LIMITS    = os.getenv("DBOT_ENFORCE_DAILY_LIMITS", "false").lower() == "true"
+DBOT_DAILY_MAX_STAKE_USD     = float(os.getenv("DBOT_DAILY_MAX_STAKE_USD", "0.0"))    # Maximum cumulative stakes per calendar day (0.0 = unlimited)
+DBOT_DAILY_STOP_LOSS_USD     = float(os.getenv("DBOT_DAILY_STOP_LOSS_USD", "0.0"))    # Hard daily stop loss (0.0 = unlimited)
+DBOT_DAILY_TAKE_PROFIT_USD   = float(os.getenv("DBOT_DAILY_TAKE_PROFIT_USD", "0.0"))  # Hard daily take profit (0.0 = unlimited)
 DBOT_INTER_TRADE_DELAY_S    = float(os.getenv("DBOT_INTER_TRADE_DELAY_S", "45.0")) # 45s cooldown between trades (sniper pacing)
 DBOT_POST_LOSS_COOLDOWN_S   = float(os.getenv("DBOT_POST_LOSS_COOLDOWN_S", "60.0")) # 60s cooling-off pause after any loss
 DBOT_MIN_CONVICTION         = float(os.getenv("DBOT_MIN_CONVICTION", "0.82"))    # Raised to 82% conviction for >=60% win-rate edge

@@ -57,13 +57,21 @@ class AITradeFilter:
         self._cache: Dict[str, Tuple[float, bool, float, str]] = {}  # key -> (timestamp, approved, confidence, reason)
 
     def _get_llm(self):
-        """Lazy-initialize TradingAgents LLM client."""
+        """Lazy-initialize LLM client with v1beta support for Gemini developer instructions."""
         if self._llm is None:
             try:
-                client = create_llm_client("google", self.model_name)
-                self._llm = client.get_llm()
+                if "gemini" in self.model_name.lower():
+                    from langchain_google_genai import ChatGoogleGenerativeAI
+                    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+                    kwargs = {"model": self.model_name, "api_version": "v1beta"}
+                    if api_key:
+                        kwargs["google_api_key"] = api_key
+                    self._llm = ChatGoogleGenerativeAI(**kwargs)
+                else:
+                    client = create_llm_client("google", self.model_name)
+                    self._llm = client.get_llm()
             except Exception as e:
-                log.error(f"Failed to initialize TradingAgents LLM client ({self.model_name}): {e}")
+                log.error(f"Failed to initialize LLM client ({self.model_name}): {e}")
                 self._llm = None
         return self._llm
 
@@ -129,8 +137,9 @@ class AITradeFilter:
                 SystemMessage(content=_SYSTEM_PROMPT),
                 HumanMessage(content=user_prompt),
             ]
-            # Enforce 6.0s timeout to protect tick-level execution timing
-            response = await asyncio.wait_for(llm.ainvoke(messages), timeout=6.0)
+            # Enforce configurable timeout (default 12.0s) to protect tick-level execution timing
+            timeout_s = float(getattr(config, "AI_FILTER_TIMEOUT_S", 12.0))
+            response = await asyncio.wait_for(llm.ainvoke(messages), timeout=timeout_s)
             response = normalize_content(response)
             raw_content = response.content if hasattr(response, "content") else str(response)
             cleaned = self._clean_json(raw_content)
@@ -144,6 +153,9 @@ class AITradeFilter:
             self._cache[cache_key] = (now, approved, ai_conf, reason)
             return approved, ai_conf, reason
 
+        except asyncio.TimeoutError:
+            log.warning("AI Gatekeeper evaluation timed out (>12s). Bypassing to quantitative fallback.")
+            return True, conviction, "AI Gatekeeper bypass: Evaluation timed out (>12s)"
         except Exception as e:
             log.warning(f"AI Gatekeeper evaluation error ({e}). Bypassing to quantitative fallback.")
             return True, conviction, f"AI Gatekeeper bypass: {e}"
