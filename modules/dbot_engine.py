@@ -236,7 +236,7 @@ class DBotEngine:
         log.info(f"   Session Persistence : {'Active (data/dbot_session.json)' if self.persist_session else 'Disabled'}")
         log.info(f"   Inter-Trade Delay   : {self.inter_trade_delay}s")
         log.info(f"   Execution Mode      : {'Continuous Testing (Auto-Roll Cycles)' if self.continuous_mode else 'Standard Session (Halts on Target)'}")
-        log.info(f"   AI Gatekeeper       : {'Active (' + getattr(config, 'AI_FILTER_MODEL', 'gemini-3.8-flash') + ')' if getattr(config, 'AI_TRADE_FILTER_ENABLED', True) else 'Disabled'}")
+        log.info(f"   AI Gatekeeper       : {'Active (' + getattr(config, 'AI_FILTER_MODEL', 'gemini-2.5-flash') + ')' if getattr(config, 'AI_TRADE_FILTER_ENABLED', False) else 'Disabled'}")
         log.info(f"   Account Mode        : {'DEMO' if getattr(config, 'DEMO_MODE', True) else 'REAL'}")
         log.info("=" * 80)
 
@@ -594,8 +594,8 @@ class DBotEngine:
             stake_to_use = min(round(self.current_stake, 2), self.max_stake)
             sizing_label = self.staking_strategy
 
-        # Multi-Agent AI Pre-Trade Gatekeeper (TradingAgents + Gemini)
-        if getattr(config, "AI_TRADE_FILTER_ENABLED", True):
+        # Multi-Agent AI Pre-Trade Gatekeeper (Optional)
+        if getattr(config, "AI_TRADE_FILTER_ENABLED", False):
             ctx = {
                 "rationale": rationale,
                 "htf_trend": "BULLISH" if "Bullish" in rationale else ("BEARISH" if "Bearish" in rationale else "NEUTRAL"),

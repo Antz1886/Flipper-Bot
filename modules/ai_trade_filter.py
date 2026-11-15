@@ -58,14 +58,17 @@ class AITradeFilter:
 
     def _get_llm(self):
         """Lazy-initialize LLM client with v1beta support for Gemini developer instructions."""
+        if not self.enabled:
+            return None
         if self._llm is None:
             try:
                 if "gemini" in self.model_name.lower():
                     from langchain_google_genai import ChatGoogleGenerativeAI
                     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-                    kwargs = {"model": self.model_name, "api_version": "v1beta"}
-                    if api_key:
-                        kwargs["google_api_key"] = api_key
+                    if not api_key:
+                        log.debug("No GEMINI_API_KEY configured; AI trade filter disabled.")
+                        return None
+                    kwargs = {"model": self.model_name, "api_version": "v1beta", "google_api_key": api_key}
                     self._llm = ChatGoogleGenerativeAI(**kwargs)
                 else:
                     client = create_llm_client("google", self.model_name)
@@ -169,7 +172,7 @@ def get_ai_trade_filter() -> AITradeFilter:
     """Retrieve singleton instance of AITradeFilter."""
     global _filter_instance
     if _filter_instance is None:
-        enabled = getattr(config, "AI_TRADE_FILTER_ENABLED", True)
+        enabled = getattr(config, "AI_TRADE_FILTER_ENABLED", False)
         model = getattr(config, "AI_FILTER_MODEL", "gemini-2.5-flash")
         ttl = float(getattr(config, "AI_FILTER_CACHE_TTL_S", 45.0))
         _filter_instance = AITradeFilter(model_name=model, cache_ttl_s=ttl, enabled=enabled)

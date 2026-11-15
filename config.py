@@ -149,7 +149,7 @@ BOT_MODE                    = os.getenv("BOT_MODE", "DBOT").upper()
 DBOT_SYMBOL                 = os.getenv("DBOT_SYMBOL", "1HZ100V")
 DBOT_DIRECTION_MODE         = os.getenv("DBOT_DIRECTION_MODE", "DYNAMIC").upper() # "DYNAMIC", "TREND_FOLLOW", "PUT", "CALL"
 DBOT_CONTRACT_TYPE          = os.getenv("DBOT_CONTRACT_TYPE", "PUT").upper()     # Baseline fallback: "PUT" (Fall) or "CALL" (Rise)
-DBOT_DURATION               = int(os.getenv("DBOT_DURATION", "60"))              # 60s (1m) duration allows directional momentum to travel
+DBOT_DURATION               = int(os.getenv("DBOT_DURATION", "15"))              # 15s optimal impulse horizon for 1HZ100V
 DBOT_DURATION_UNIT          = os.getenv("DBOT_DURATION_UNIT", "s")               # "s" for seconds ("t" for ticks)
 
 # Staking strategy: "FLAT" (Quant Recommended: Fixed 1-unit sizing, zero Martingale/D'Alembert drag),
@@ -174,7 +174,7 @@ DBOT_DAILY_STOP_LOSS_USD     = float(os.getenv("DBOT_DAILY_STOP_LOSS_USD", "0.0"
 DBOT_DAILY_TAKE_PROFIT_USD   = float(os.getenv("DBOT_DAILY_TAKE_PROFIT_USD", "0.0"))  # Hard daily take profit (0.0 = unlimited)
 DBOT_INTER_TRADE_DELAY_S    = float(os.getenv("DBOT_INTER_TRADE_DELAY_S", "45.0")) # 45s cooldown between trades (sniper pacing)
 DBOT_POST_LOSS_COOLDOWN_S   = float(os.getenv("DBOT_POST_LOSS_COOLDOWN_S", "60.0")) # 60s cooling-off pause after any loss
-DBOT_MIN_CONVICTION         = float(os.getenv("DBOT_MIN_CONVICTION", "0.82"))    # Raised to 82% conviction for >=60% win-rate edge
+DBOT_MIN_CONVICTION         = float(os.getenv("DBOT_MIN_CONVICTION", "0.85"))    # Raised to 85% conviction for >=62% win-rate edge
 DBOT_VETO_RETRY_DELAY_S     = float(os.getenv("DBOT_VETO_RETRY_DELAY_S", "5.0"))  # Seconds to wait when signal is vetoed before checking next tick setup
 DBOT_HTF_TIMEFRAME_S        = int(os.getenv("DBOT_HTF_TIMEFRAME_S", "60"))       # 60s (M1) HTF trend filter
 DBOT_MACRO_TIMEFRAME_S      = int(os.getenv("DBOT_MACRO_TIMEFRAME_S", "300"))     # 300s (M5) Macro trend filter
@@ -194,7 +194,7 @@ DBOT_USE_STREAMING          = os.getenv("DBOT_USE_STREAMING", "true").lower() ==
 DBOT_CONTINUOUS_MODE        = os.getenv("DBOT_CONTINUOUS_MODE", "true").lower() == "true" # Continuous automated cycles (user preference)
 
 # ─── Multi-Agent AI Pre-Trade Gatekeeper (TradingAgents Integration) ───────────
-AI_TRADE_FILTER_ENABLED     = os.getenv("AI_TRADE_FILTER_ENABLED", "true").lower() == "true"
+AI_TRADE_FILTER_ENABLED     = os.getenv("AI_TRADE_FILTER_ENABLED", "false").lower() == "true"
 AI_FILTER_MODEL             = os.getenv("AI_FILTER_MODEL", "gemini-2.5-flash")
 AI_FILTER_CACHE_TTL_S       = float(os.getenv("AI_FILTER_CACHE_TTL_S", "45.0"))
 AI_FILTER_MIN_CONVICTION    = float(os.getenv("AI_FILTER_MIN_CONVICTION", "0.75"))

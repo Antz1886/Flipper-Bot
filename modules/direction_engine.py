@@ -280,72 +280,75 @@ def evaluate_tick_bias(
                 0.45,
                 f"{align_desc}, but overextended (RSI {tick_rsi:.1f}, Z {z_score:+.2f}). Waiting for dip.",
             )
-        elif (tick_rsi <= 45.0 or z_score <= -0.7 or current_price <= lower_bb or down_ticks >= 1 or is_higher_low) and (last_tick_up or is_higher_low or down_ticks >= 1):
-            # High-conviction structural pullback entry in an uptrend
-            conv = 0.92 if dual_htf_aligned else 0.88
+
+        # High-conviction structural pullback: Discount + Confirmed tick bounce + Directional efficiency
+        is_discount = (z_score <= -0.5) or (tick_rsi <= 50.0) or (current_price <= lower_bb)
+        is_reversal_confirmed = last_tick_up and (down_ticks >= 1)
+        if is_discount and is_reversal_confirmed and er >= er_threshold:
+            conv = 0.92 if dual_htf_aligned else 0.86
             return (
                 "CALL",
                 conv,
-                f"{align_desc} + Deep dip structural entry (Z {z_score:+.2f}, RSI {tick_rsi:.1f}, support confirmed)",
+                f"{align_desc} + Deep dip structural entry (Z {z_score:+.2f}, RSI {tick_rsi:.1f}, up-reversal confirmed)",
             )
-        elif (is_uptrend or up_ticks >= 2) and tick_rsi <= 55.0:
-            conv = 0.88 if dual_htf_aligned else 0.84
+        elif dual_htf_aligned and is_uptrend and last_tick_up and er >= 0.38 and tick_rsi <= 58.0:
             return (
                 "CALL",
-                conv,
-                f"{align_desc} continuation (ER {er:.2f}, EMA5 > EMA15, RSI {tick_rsi:.1f} <= 55)",
+                0.88,
+                f"{align_desc} continuation (ER {er:.2f}, EMA5 > EMA15, RSI {tick_rsi:.1f})",
             )
         else:
             return (
                 "CALL",
-                0.60,
+                0.55,
                 f"{align_desc} bias but awaiting cleaner dip (RSI {tick_rsi:.1f}, Z {z_score:+.2f})",
             )
 
     elif htf_trend == "BEARISH":
         # In a bearish HTF trend: ONLY allow PUT options (ban counter-trend CALLs)
         align_desc = "Dual HTF (M5+M1) Consensus" if dual_htf_aligned else "Bearish HTF (M1)"
-        if tick_rsi < 30.0 or z_score < -1.8:
+        if tick_rsi < 32.0 or z_score < -1.8:
             return (
                 "PUT",
                 0.45,
                 f"{align_desc}, but oversold (RSI {tick_rsi:.1f}, Z {z_score:+.2f}). Waiting for bounce.",
             )
-        elif (tick_rsi >= 45.0 or z_score >= 0.7 or current_price >= upper_bb or up_ticks >= 1 or is_lower_high) and (last_tick_down or is_lower_high or up_ticks >= 1):
-            # High-conviction structural bounce fade in a downtrend
-            conv = 0.92 if dual_htf_aligned else 0.88
+
+        # High-conviction structural bounce fade: Premium + Confirmed tick rejection + Directional efficiency
+        is_premium = (z_score >= 0.5) or (tick_rsi >= 50.0) or (current_price >= upper_bb)
+        is_reversal_confirmed = last_tick_down and (up_ticks >= 1)
+        if is_premium and is_reversal_confirmed and er >= er_threshold:
+            conv = 0.92 if dual_htf_aligned else 0.86
             return (
                 "PUT",
                 conv,
-                f"{align_desc} + Bounce fade structural entry (Z {z_score:+.2f}, RSI {tick_rsi:.1f}, resistance confirmed)",
+                f"{align_desc} + Bounce fade structural entry (Z {z_score:+.2f}, RSI {tick_rsi:.1f}, down-reversal confirmed)",
             )
-        elif is_downtrend or down_ticks >= 2:
-            conv = 0.88 if dual_htf_aligned else 0.84
+        elif dual_htf_aligned and is_downtrend and last_tick_down and er >= 0.38 and tick_rsi >= 42.0:
             return (
                 "PUT",
-                conv,
+                0.88,
                 f"{align_desc} continuation (ER {er:.2f}, EMA5 < EMA15, RSI {tick_rsi:.1f})",
             )
         else:
             return (
                 "PUT",
-                0.60,
+                0.55,
                 f"{align_desc} bias but awaiting cleaner bounce (RSI {tick_rsi:.1f}, Z {z_score:+.2f})",
             )
 
-    # 6. Neutral HTF Mode: Statistical Mean-Reversion & Confirmed Micro-Impulses
-    # 6A. High-Edge Mean Reversion Extremes (Statistical boundaries of PRNG synthetic indices)
-    # Require confirmed tick reversal (down-tick for PUT / up-tick for CALL) to avoid catching falling knives
-    if (z_score >= 2.0 or (current_price >= upper_bb and z_score >= 1.8)) and tick_rsi >= 70.0 and last_tick_down and down_ticks >= 1:
+    # 6. Neutral HTF Mode: Statistical Mean-Reversion Extremes Only
+    # Require confirmed tick reversal (down-tick for PUT / up-tick for CALL) + exhaustion
+    if (z_score >= 2.0 or (current_price >= upper_bb and z_score >= 1.8)) and tick_rsi >= 68.0 and last_tick_down and up_ticks >= 1:
         return (
             "PUT",
-            0.88,
+            0.90,
             f"Overbought confirmed statistical reversal (Z {z_score:+.2f} >= 2.0, RSI {tick_rsi:.1f}, tick reversal confirmed)",
         )
-    elif (z_score <= -2.0 or (current_price <= lower_bb and z_score <= -1.8)) and tick_rsi <= 30.0 and last_tick_up and up_ticks >= 1:
+    elif (z_score <= -2.0 or (current_price <= lower_bb and z_score <= -1.8)) and tick_rsi <= 32.0 and last_tick_up and down_ticks >= 1:
         return (
             "CALL",
-            0.88,
+            0.90,
             f"Oversold confirmed statistical reversal (Z {z_score:+.2f} <= -2.0, RSI {tick_rsi:.1f}, tick reversal confirmed)",
         )
 
@@ -357,19 +360,19 @@ def evaluate_tick_bias(
 
     if is_bearish_exhaustion:
         direction = "PUT"
-        conviction = 0.88
+        conviction = 0.86
         rationale = f"Bearish micro-trend (EMA5 {ema_fast:.2f} < EMA15 {ema_slow:.2f}) with exhaustion pullback ({up_ticks} up ticks + down reversal)"
     elif is_bearish_impulse:
         direction = "PUT"
-        conviction = 0.84
+        conviction = 0.80
         rationale = f"Bearish impulse continuation (EMA5 < EMA15, {down_ticks}/3 down ticks, ER {er:.2f} >= {er_threshold})"
     elif is_bullish_exhaustion:
         direction = "CALL"
-        conviction = 0.88
+        conviction = 0.86
         rationale = f"Bullish micro-trend (EMA5 {ema_fast:.2f} > EMA15 {ema_slow:.2f}) with exhaustion pullback ({down_ticks} down ticks + up reversal)"
     elif is_bullish_impulse:
         direction = "CALL"
-        conviction = 0.84
+        conviction = 0.80
         rationale = f"Bullish impulse continuation (EMA5 > EMA15, {up_ticks}/3 up ticks, ER {er:.2f} >= {er_threshold})"
     elif tick_rsi < 30.0:
         direction = "CALL"
