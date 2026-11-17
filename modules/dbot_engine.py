@@ -50,6 +50,10 @@ class DBotEngine:
         persist_session: bool = getattr(config, "DBOT_PERSIST_SESSION", True),
         use_streaming: bool = getattr(config, "DBOT_USE_STREAMING", True),
         continuous_mode: bool = getattr(config, "DBOT_CONTINUOUS_MODE", True),
+        enforce_daily_limits: bool = getattr(config, "DBOT_ENFORCE_DAILY_LIMITS", False),
+        daily_max_stake_usd: float = getattr(config, "DBOT_DAILY_MAX_STAKE_USD", 0.0),
+        daily_stop_loss_usd: float = getattr(config, "DBOT_DAILY_STOP_LOSS_USD", 0.0),
+        daily_take_profit_usd: float = getattr(config, "DBOT_DAILY_TAKE_PROFIT_USD", 0.0),
     ):
         self.symbol = symbol
         self.direction_mode = direction_mode.upper()
@@ -77,10 +81,10 @@ class DBotEngine:
         self.cycle_count: int = 1
 
         # Institutional Daily Risk Governor (Optional Daily Cap; Disabled by Default for Unlimited Trading)
-        self.enforce_daily_limits: bool = getattr(config, "DBOT_ENFORCE_DAILY_LIMITS", False)
-        self.daily_max_stake_usd: float = float(getattr(config, "DBOT_DAILY_MAX_STAKE_USD", 0.0))
-        self.daily_stop_loss_usd: float = float(getattr(config, "DBOT_DAILY_STOP_LOSS_USD", 0.0))
-        self.daily_take_profit_usd: float = float(getattr(config, "DBOT_DAILY_TAKE_PROFIT_USD", 0.0))
+        self.enforce_daily_limits: bool = bool(enforce_daily_limits)
+        self.daily_max_stake_usd: float = float(daily_max_stake_usd)
+        self.daily_stop_loss_usd: float = float(daily_stop_loss_usd)
+        self.daily_take_profit_usd: float = float(daily_take_profit_usd)
 
         # Intraday Tracking
         self.daily_date_utc: str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -711,10 +715,11 @@ class DBotEngine:
                 self.current_stake = self.base_stake
 
             daily_info = f" | Daily: ${self.daily_net_pnl:+.2f} (${self.daily_staked_total:.2f}/${self.daily_max_stake_usd:.2f} staked)" if self.enforce_daily_limits else ""
+            bench_info = f" [Benchmark: {self.total_trades}/66, Target WR: 74%]" if self.total_trades <= 66 else ""
             log.info(
                 f"✅ [WIN] #{trade_num} Contract #{contract_id} | Entry: {entry_spot} -> Exit: {exit_tick} | "
                 f"Profit: +${profit:.2f} | Session PnL: ${self.session_pnl:+.2f} "
-                f"(Wins: {self.total_wins}/{self.total_trades}, WR: {win_rate:.1f}%){daily_info} | "
+                f"(Wins: {self.total_wins}/{self.total_trades}, WR: {win_rate:.1f}%){bench_info}{daily_info} | "
                 f"Next Stake ({self.staking_strategy}): ${self.current_stake:.2f}"
             )
         else:
@@ -740,10 +745,11 @@ class DBotEngine:
                 sizing_desc = f"x{self.martingale_multiplier:.1f}"
 
             daily_info = f" | Daily: ${self.daily_net_pnl:+.2f} (${self.daily_staked_total:.2f}/${self.daily_max_stake_usd:.2f} staked)" if self.enforce_daily_limits else ""
+            bench_info = f" [Benchmark: {self.total_trades}/66, Target WR: 74%]" if self.total_trades <= 66 else ""
             log.info(
                 f"❌ [LOSS] #{trade_num} Contract #{contract_id} | Entry: {entry_spot} -> Exit: {exit_tick} | "
                 f"Loss: -${abs(profit):.2f} | Session PnL: ${self.session_pnl:+.2f} "
-                f"(Losses: {self.total_losses}/{self.total_trades}, WR: {win_rate:.1f}%){daily_info} | "
+                f"(Losses: {self.total_losses}/{self.total_trades}, WR: {win_rate:.1f}%){bench_info}{daily_info} | "
                 f"Next Stake ({sizing_desc}): ${self.current_stake:.2f} (Streak: {self.consecutive_losses})"
             )
 
@@ -759,6 +765,13 @@ class DBotEngine:
             entry_spot=entry_spot,
             exit_tick=exit_tick,
         )
+
+        # Sniper Post-Loss Cooldown: Halt immediately after loss to let toxic regime clear
+        if (status != "won" and profit <= 0) and self.post_loss_cooldown > 0:
+            log.info(
+                f"⏳ [SNIPER POST-LOSS COOLDOWN] Cooling off for {self.post_loss_cooldown:.0f}s to allow toxic microstructure regime to clear..."
+            )
+            await asyncio.sleep(self.post_loss_cooldown)
 
         return True
 

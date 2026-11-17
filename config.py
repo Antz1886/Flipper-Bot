@@ -79,7 +79,7 @@ MAX_ALLOWED_SPREAD_PIPS = {
     "R_75": 100.0,    # Max 10.0 points spread (Deriv baseline ~6.0 points / 60 pips at 0.1/pip)
     "R_100": 35.0,    # Max 0.35 points spread (Deriv baseline ~0.20 points / 20 pips at 0.01/pip)
     "R_50": 8.0,      # Max 0.08 points spread (Deriv baseline ~0.02 points / 2 pips at 0.01/pip)
-    "1HZ100V": 35.0,  # Max 0.35 points spread (Deriv baseline ~0.20 points / 20 pips at 0.01/pip)
+    "1HZ100V": 20.0,  # Max 0.20 points spread (Deriv baseline ~0.20 points / 20 pips at 0.01/pip)
     "1HZ75V": 100.0,  # Max 10.0 points spread (at 0.1/pip)
     "frxEURUSD": 1.5,
     "frxGBPUSD": 2.0,
@@ -153,31 +153,31 @@ DBOT_DURATION               = int(os.getenv("DBOT_DURATION", "15"))             
 DBOT_DURATION_UNIT          = os.getenv("DBOT_DURATION_UNIT", "s")               # "s" for seconds ("t" for ticks)
 
 # Staking strategy: "FLAT" (Quant Recommended: Fixed 1-unit sizing, zero Martingale/D'Alembert drag),
-#                   "CONVICTION" ($2 base, $3 on >=90% conviction + dual HTF, flat reset on loss),
+#                   "CONVICTION" ($2 base, $3 on >=92% conviction + dual HTF, flat reset on loss),
 #                   "DALEMBERT" (Unit step: +$1 on loss, -$1 on win), or "MARTINGALE"
 DBOT_STAKING_STRATEGY       = os.getenv("DBOT_STAKING_STRATEGY", "FLAT").upper()
 DBOT_BASE_STAKE             = float(os.getenv("DBOT_BASE_STAKE", "2.0"))         # Base / Floor stake ($2.00)
-DBOT_CONVICTION_HIGH_STAKE  = float(os.getenv("DBOT_CONVICTION_HIGH_STAKE", "3.0")) # Stake size on >=90% conviction ($3.00)
-DBOT_CONVICTION_THRESHOLD_HIGH = float(os.getenv("DBOT_CONVICTION_THRESHOLD_HIGH", "0.90")) # Conviction cutoff for high stake
+DBOT_CONVICTION_HIGH_STAKE  = float(os.getenv("DBOT_CONVICTION_HIGH_STAKE", "3.0")) # Stake size on >=92% conviction ($3.00)
+DBOT_CONVICTION_THRESHOLD_HIGH = float(os.getenv("DBOT_CONVICTION_THRESHOLD_HIGH", "0.92")) # Conviction cutoff for high stake
 DBOT_DALEMBERT_UNIT         = float(os.getenv("DBOT_DALEMBERT_UNIT", "1.0"))     # D'Alembert step unit (+$1.00 / -$1.00)
 DBOT_MARTINGALE_MULTIPLIER  = float(os.getenv("DBOT_MARTINGALE_MULTIPLIER", "2.0")) # Multiplier on loss (2.0x) if using Martingale
 DBOT_MAX_LOSS_STREAK        = int(os.getenv("DBOT_MAX_LOSS_STREAK", "3"))        # Max consecutive losses before cooling down
 DBOT_ACTION_ON_MAX_LOSS     = os.getenv("DBOT_ACTION_ON_MAX_LOSS", "RESET").upper() # "RESET" or "HALT"
 DBOT_MAX_STAKE              = float(os.getenv("DBOT_MAX_STAKE", "5.0"))          # Optimal stake ceiling ($5.00) maximizing expectancy and mitigating deep drawdowns
-DBOT_TAKE_PROFIT_USD        = float(os.getenv("DBOT_TAKE_PROFIT_USD", "30.0"))    # Cycle take profit target ($30.00)
-DBOT_STOP_LOSS_USD          = float(os.getenv("DBOT_STOP_LOSS_USD", "30.0"))      # Cumulative stop loss threshold ($30.00)
+DBOT_TAKE_PROFIT_USD        = float(os.getenv("DBOT_TAKE_PROFIT_USD", "25.0"))    # Cycle take profit target ($25.00)
+DBOT_STOP_LOSS_USD          = float(os.getenv("DBOT_STOP_LOSS_USD", "15.0"))      # Cumulative stop loss threshold ($15.00)
 
-# Institutional Daily Risk Governor (Optional Daily Cap; Disabled by Default for Unlimited Continuous Trading)
-DBOT_ENFORCE_DAILY_LIMITS    = os.getenv("DBOT_ENFORCE_DAILY_LIMITS", "false").lower() == "true"
-DBOT_DAILY_MAX_STAKE_USD     = float(os.getenv("DBOT_DAILY_MAX_STAKE_USD", "0.0"))    # Maximum cumulative stakes per calendar day (0.0 = unlimited)
-DBOT_DAILY_STOP_LOSS_USD     = float(os.getenv("DBOT_DAILY_STOP_LOSS_USD", "0.0"))    # Hard daily stop loss (0.0 = unlimited)
-DBOT_DAILY_TAKE_PROFIT_USD   = float(os.getenv("DBOT_DAILY_TAKE_PROFIT_USD", "0.0"))  # Hard daily take profit (0.0 = unlimited)
-DBOT_INTER_TRADE_DELAY_S    = float(os.getenv("DBOT_INTER_TRADE_DELAY_S", "45.0")) # 45s cooldown between trades (sniper pacing)
-DBOT_POST_LOSS_COOLDOWN_S   = float(os.getenv("DBOT_POST_LOSS_COOLDOWN_S", "60.0")) # 60s cooling-off pause after any loss
-DBOT_MIN_CONVICTION         = float(os.getenv("DBOT_MIN_CONVICTION", "0.85"))    # Raised to 85% conviction for >=62% win-rate edge
-DBOT_VETO_RETRY_DELAY_S     = float(os.getenv("DBOT_VETO_RETRY_DELAY_S", "5.0"))  # Seconds to wait when signal is vetoed before checking next tick setup
-DBOT_HTF_TIMEFRAME_S        = int(os.getenv("DBOT_HTF_TIMEFRAME_S", "60"))       # 60s (M1) HTF trend filter
-DBOT_MACRO_TIMEFRAME_S      = int(os.getenv("DBOT_MACRO_TIMEFRAME_S", "300"))     # 300s (M5) Macro trend filter
+# Institutional Daily Risk Governor (Sniper Daily Caps to Guarantee >=74% Daily Green Days)
+DBOT_ENFORCE_DAILY_LIMITS    = os.getenv("DBOT_ENFORCE_DAILY_LIMITS", "true").lower() == "true"
+DBOT_DAILY_MAX_STAKE_USD     = float(os.getenv("DBOT_DAILY_MAX_STAKE_USD", "50.0"))   # Max cumulative stakes per day (~25 trades max at $2)
+DBOT_DAILY_STOP_LOSS_USD     = float(os.getenv("DBOT_DAILY_STOP_LOSS_USD", "15.0"))   # Hard daily stop loss ($15.00)
+DBOT_DAILY_TAKE_PROFIT_USD   = float(os.getenv("DBOT_DAILY_TAKE_PROFIT_USD", "25.0")) # Hard daily take profit ($25.00)
+DBOT_INTER_TRADE_DELAY_S    = float(os.getenv("DBOT_INTER_TRADE_DELAY_S", "60.0"))  # 60s cooldown between trades (sniper pacing)
+DBOT_POST_LOSS_COOLDOWN_S   = float(os.getenv("DBOT_POST_LOSS_COOLDOWN_S", "120.0")) # 120s cooling-off pause after any loss
+DBOT_MIN_CONVICTION         = float(os.getenv("DBOT_MIN_CONVICTION", "0.90"))     # Raised to 90% conviction for >=74% win-rate edge
+DBOT_VETO_RETRY_DELAY_S     = float(os.getenv("DBOT_VETO_RETRY_DELAY_S", "5.0"))   # Seconds to wait when signal is vetoed before checking next tick setup
+DBOT_HTF_TIMEFRAME_S        = int(os.getenv("DBOT_HTF_TIMEFRAME_S", "60"))        # 60s (M1) HTF trend filter
+DBOT_MACRO_TIMEFRAME_S      = int(os.getenv("DBOT_MACRO_TIMEFRAME_S", "300"))      # 300s (M5) Macro trend filter
 DBOT_USE_HTF_FILTER         = os.getenv("DBOT_USE_HTF_FILTER", "true").lower() == "true"
 DBOT_USE_DUAL_HTF           = os.getenv("DBOT_USE_DUAL_HTF", "true").lower() == "true" # Dual M1 + M5 consensus
 DBOT_USE_RSI_FILTER         = os.getenv("DBOT_USE_RSI_FILTER", "true").lower() == "true"
@@ -186,12 +186,12 @@ DBOT_USE_ZSCORE_FILTER      = os.getenv("DBOT_USE_ZSCORE_FILTER", "true").lower(
 DBOT_ZSCORE_PERIOD          = int(os.getenv("DBOT_ZSCORE_PERIOD", "20"))
 DBOT_ZSCORE_EXTREME         = float(os.getenv("DBOT_ZSCORE_EXTREME", "1.8"))
 DBOT_USE_EFFICIENCY_RATIO   = os.getenv("DBOT_USE_EFFICIENCY_RATIO", "true").lower() == "true" # Kaufman Efficiency Ratio
-DBOT_ER_TREND_THRESHOLD     = float(os.getenv("DBOT_ER_TREND_THRESHOLD", "0.35"))
+DBOT_ER_TREND_THRESHOLD     = float(os.getenv("DBOT_ER_TREND_THRESHOLD", "0.42"))  # Raised to 0.42 to reject choppy Brownian walk
 DBOT_USE_CHOP_FILTER        = os.getenv("DBOT_USE_CHOP_FILTER", "true").lower() == "true"
-DBOT_CHOP_RATIO             = float(os.getenv("DBOT_CHOP_RATIO", "0.75"))        # Raised from 0.65 to 0.75 for early chop defense
+DBOT_CHOP_RATIO             = float(os.getenv("DBOT_CHOP_RATIO", "0.80"))         # Raised to 0.80 for early chop defense
 DBOT_PERSIST_SESSION        = os.getenv("DBOT_PERSIST_SESSION", "true").lower() == "true" # Resilient session persistence on disk
-DBOT_USE_STREAMING          = os.getenv("DBOT_USE_STREAMING", "true").lower() == "true"   # Real-time WebSocket streaming settlement
-DBOT_CONTINUOUS_MODE        = os.getenv("DBOT_CONTINUOUS_MODE", "true").lower() == "true" # Continuous automated cycles (user preference)
+DBOT_USE_STREAMING          = os.getenv("DBOT_USE_STREAMING", "true").lower() == "true"    # Real-time WebSocket streaming settlement
+DBOT_CONTINUOUS_MODE        = os.getenv("DBOT_CONTINUOUS_MODE", "true").lower() == "true"  # Continuous automated cycles (user preference)
 
 # ─── Multi-Agent AI Pre-Trade Gatekeeper (TradingAgents Integration) ───────────
 AI_TRADE_FILTER_ENABLED     = os.getenv("AI_TRADE_FILTER_ENABLED", "false").lower() == "true"

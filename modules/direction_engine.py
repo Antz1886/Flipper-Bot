@@ -285,16 +285,16 @@ def evaluate_tick_bias(
         is_discount = (z_score <= -0.5) or (tick_rsi <= 50.0) or (current_price <= lower_bb)
         is_reversal_confirmed = last_tick_up and (down_ticks >= 1)
         if is_discount and is_reversal_confirmed and er >= er_threshold:
-            conv = 0.92 if dual_htf_aligned else 0.86
+            conv = 0.94 if dual_htf_aligned else 0.86
             return (
                 "CALL",
                 conv,
                 f"{align_desc} + Deep dip structural entry (Z {z_score:+.2f}, RSI {tick_rsi:.1f}, up-reversal confirmed)",
             )
-        elif dual_htf_aligned and is_uptrend and last_tick_up and er >= 0.38 and tick_rsi <= 58.0:
+        elif dual_htf_aligned and is_uptrend and last_tick_up and er >= 0.45 and tick_rsi <= 56.0:
             return (
                 "CALL",
-                0.88,
+                0.90,
                 f"{align_desc} continuation (ER {er:.2f}, EMA5 > EMA15, RSI {tick_rsi:.1f})",
             )
         else:
@@ -318,16 +318,16 @@ def evaluate_tick_bias(
         is_premium = (z_score >= 0.5) or (tick_rsi >= 50.0) or (current_price >= upper_bb)
         is_reversal_confirmed = last_tick_down and (up_ticks >= 1)
         if is_premium and is_reversal_confirmed and er >= er_threshold:
-            conv = 0.92 if dual_htf_aligned else 0.86
+            conv = 0.94 if dual_htf_aligned else 0.86
             return (
                 "PUT",
                 conv,
                 f"{align_desc} + Bounce fade structural entry (Z {z_score:+.2f}, RSI {tick_rsi:.1f}, down-reversal confirmed)",
             )
-        elif dual_htf_aligned and is_downtrend and last_tick_down and er >= 0.38 and tick_rsi >= 42.0:
+        elif dual_htf_aligned and is_downtrend and last_tick_down and er >= 0.45 and tick_rsi >= 44.0:
             return (
                 "PUT",
-                0.88,
+                0.90,
                 f"{align_desc} continuation (ER {er:.2f}, EMA5 < EMA15, RSI {tick_rsi:.1f})",
             )
         else:
@@ -342,13 +342,13 @@ def evaluate_tick_bias(
     if (z_score >= 2.0 or (current_price >= upper_bb and z_score >= 1.8)) and tick_rsi >= 68.0 and last_tick_down and up_ticks >= 1:
         return (
             "PUT",
-            0.90,
+            0.92,
             f"Overbought confirmed statistical reversal (Z {z_score:+.2f} >= 2.0, RSI {tick_rsi:.1f}, tick reversal confirmed)",
         )
     elif (z_score <= -2.0 or (current_price <= lower_bb and z_score <= -1.8)) and tick_rsi <= 32.0 and last_tick_up and down_ticks >= 1:
         return (
             "CALL",
-            0.90,
+            0.92,
             f"Oversold confirmed statistical reversal (Z {z_score:+.2f} <= -2.0, RSI {tick_rsi:.1f}, tick reversal confirmed)",
         )
 

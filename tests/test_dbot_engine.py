@@ -95,7 +95,8 @@ class TestDirectionEngine(unittest.TestCase):
         self.assertEqual(conviction, 0.50)
 
     def test_dual_htf_consensus_boost(self):
-        prices = [1210.0 + (i % 2) * 0.1 for i in range(25)]
+        # Build trending series with a dip and confirmed up-reversal tick
+        prices = [1210.0 + (i * 0.1) for i in range(20)] + [1211.8, 1211.5, 1211.7]
         dir_res, conv_res, rationale = evaluate_tick_bias(
             prices,
             htf_trend="BULLISH",
@@ -118,6 +119,8 @@ class TestDBotEngine(unittest.TestCase):
     def setUp(self):
         self.conn_patcher = patch.object(DBotEngine, "_ensure_connection", new_callable=AsyncMock)
         self.mock_ensure_conn = self.conn_patcher.start()
+        self.sleep_patcher = patch("asyncio.sleep", new_callable=AsyncMock)
+        self.mock_sleep = self.sleep_patcher.start()
         self.engine = DBotEngine(
             symbol="1HZ100V",
             direction_mode="PUT",
@@ -133,7 +136,9 @@ class TestDBotEngine(unittest.TestCase):
             take_profit_usd=20.0,
             stop_loss_usd=20.0,
             inter_trade_delay=0.0,
+            post_loss_cooldown=0.0,
             min_conviction=0.50,
+            enforce_daily_limits=False,
             persist_session=False,
             use_streaming=False,
             continuous_mode=False,
@@ -141,6 +146,7 @@ class TestDBotEngine(unittest.TestCase):
 
     def tearDown(self):
         self.conn_patcher.stop()
+        self.sleep_patcher.stop()
 
     def test_initialization(self):
         self.assertEqual(self.engine.symbol, "1HZ100V")

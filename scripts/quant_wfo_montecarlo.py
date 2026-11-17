@@ -107,9 +107,9 @@ def evaluate_simulation(
     duration: int = 15,
     stake: float = 2.0,
     payout_rate: float = 0.88,
-    z_threshold: float = 0.70,
-    er_min: float = 0.35,
-    cooldown_ticks: int = 30,
+    z_threshold: float = 0.50,
+    er_min: float = 0.42,
+    cooldown_ticks: int = 60,
 ) -> List[TradeResult]:
     """
     Simulates binary options execution on real tick price sequence.
@@ -170,9 +170,9 @@ def evaluate_simulation(
                     signal = "PUT"
 
         elif strategy == "QUANT_V3":
-            # Upgraded Institutional Edge:
+            # Upgraded Institutional Sniper Edge:
             # 1. Chop / Squeeze filter (Sit out during dead volume)
-            if atr20[i] > 0 and (atr7[i] / atr20[i]) < 0.70:
+            if atr20[i] > 0 and (atr7[i] / atr20[i]) < 0.80:
                 i += 1
                 continue
 
