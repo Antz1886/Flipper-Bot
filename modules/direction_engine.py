@@ -12,12 +12,19 @@ Targeting >=60% Win Rate on Deriv Synthetics:
 
 import asyncio
 import logging
+import math
+import time
 from typing import Tuple
 
 import config
 from modules import connector
 
 log = logging.getLogger("direction_engine")
+
+# Stale tick watchdog internal state
+_last_seen_ticks: list[float] = []
+_stale_ticks_count: int = 0
+_last_tick_fetch_time: float = 0.0
 
 
 def _calculate_ema(values: list[float], period: int) -> float:
@@ -113,8 +120,60 @@ def _calculate_bollinger_bands(
     return upper, mean, lower
 
 
+def _calculate_hurst_exponent(prices: list[float], max_lag: int = 32) -> float:
+    """
+    Calculate Hurst Exponent (H) over rolling tick price series using Rescaled Range (R/S) analysis.
+    - H < 0.48: Mean-reverting regime (reversal/fade setups have statistical edge).
+    - 0.48 <= H <= 0.52: Geometric Brownian motion / random walk (no directional edge).
+    - H > 0.52: Persistent / trending regime (only continuation setups have edge; fading is banned).
+    """
+    if len(prices) < 16:
+        return 0.50
+
+    lags = [8, 16, min(max_lag, len(prices))]
+    lags = sorted(list(set(lags)))
+
+    log_lags = []
+    log_rs = []
+    for lag in lags:
+        sub = prices[-lag:]
+        n = len(sub)
+        mean_s = sum(sub) / n
+        var_s = sum((x - mean_s) ** 2 for x in sub) / max(n - 1, 1)
+        std_s = math.sqrt(var_s)
+        if std_s < 1e-6:
+            rs = 1.0
+        else:
+            # Cumulative deviations from mean
+            devs = [x - mean_s for x in sub]
+            c = 0.0
+            cum = []
+            for d in devs:
+                c += d
+                cum.append(c)
+            r = max(cum) - min(cum)
+            rs = r / std_s
+        log_lags.append(math.log(float(lag)))
+        log_rs.append(math.log(max(rs, 1e-6)))
+
+    if len(log_lags) < 2:
+        return 0.50
+
+    n_pts = len(log_lags)
+    mean_x = sum(log_lags) / n_pts
+    mean_y = sum(log_rs) / n_pts
+    denom = sum((x - mean_x) ** 2 for x in log_lags)
+    if denom < 1e-12:
+        return 0.50
+    numer = sum((log_lags[i] - mean_x) * (log_rs[i] - mean_y) for i in range(n_pts))
+    h = numer / denom
+    return max(0.05, min(0.95, h))
+
+
 async def fetch_recent_ticks(symbol: str, count: int = 50) -> list[float]:
-    """Fetch recent tick price sequence directly from Deriv WebSocket with retries."""
+    """Fetch recent tick price sequence directly from Deriv WebSocket with retries and stale watchdog."""
+    global _last_seen_ticks, _stale_ticks_count, _last_tick_fetch_time
+
     api = connector.get_api()
     if not api or not api.is_active or not api.authorized:
         try:
@@ -138,7 +197,30 @@ async def fetch_recent_ticks(symbol: str, count: int = 50) -> list[float]:
             history = resp.get("history", {})
             prices = history.get("prices", [])
             if prices:
-                return [float(p) for p in prices]
+                parsed_prices = [float(p) for p in prices]
+
+                # Watchdog check: detect frozen/stagnant tick feed
+                now = time.time()
+                if _last_seen_ticks and parsed_prices == _last_seen_ticks and (now - _last_tick_fetch_time) > 2.0:
+                    _stale_ticks_count += 1
+                    if _stale_ticks_count >= 3:
+                        log.warning(
+                            f"⚠️ [TICK WATCHDOG] Stale price feed detected ({_stale_ticks_count} consecutive "
+                            f"identical tick buffers)! Forcing Deriv WebSocket reconnection."
+                        )
+                        try:
+                            api.is_active = False
+                            await connector.ensure_connected()
+                        except Exception as rec_err:
+                            log.warning(f"Watchdog auto-reconnect failed: {rec_err}")
+                        _stale_ticks_count = 0
+                else:
+                    _last_seen_ticks = list(parsed_prices)
+                    _stale_ticks_count = 0
+                    _last_tick_fetch_time = now
+
+                return parsed_prices
+
             error = resp.get("error")
             if error:
                 log.warning(f"Deriv ticks_history error for {symbol}: {error}")
@@ -270,6 +352,13 @@ def evaluate_tick_bias(
                 f"Volatility Squeeze / Dead Chop (ATR7 {atr_fast:.3f} < {chop_ratio*100:.0f}% of ATR20 {atr_slow:.3f}). Sitting out.",
             )
 
+    # 4B. Hurst Exponent Regime Filter (Trend Persistence vs Mean-Reversion vs Random Walk)
+    hurst = _calculate_hurst_exponent(prices, max_lag=16) if getattr(config, "DBOT_USE_HURST_FILTER", True) else 0.50
+    h_trend_thresh = getattr(config, "DBOT_HURST_TREND_THRESHOLD", 0.52)
+    h_mean_rev_thresh = getattr(config, "DBOT_HURST_MEAN_REV_THRESHOLD", 0.48)
+    is_persistent_trend = hurst > h_trend_thresh
+    is_mean_reverting = hurst < h_mean_rev_thresh
+
     # 5. Macro Trend Gating (Dual HTF / M1 EMA Alignment) with Structural Pullback Requirements
     if htf_trend == "BULLISH":
         # In a bullish HTF trend: ONLY allow CALL options (ban counter-trend PUTs)
@@ -281,10 +370,20 @@ def evaluate_tick_bias(
                 f"{align_desc}, but overextended (RSI {tick_rsi:.1f}, Z {z_score:+.2f}). Waiting for dip.",
             )
 
+        # Persistent Trend Continuation: When H > threshold, trend-following momentum has dominant edge
+        if is_persistent_trend and is_uptrend and last_tick_up and er >= 0.38 and tick_rsi <= 65.0:
+            conv = 0.94 if dual_htf_aligned else 0.88
+            return (
+                "CALL",
+                conv,
+                f"{align_desc} persistent impulse continuation (H {hurst:.2f} > {h_trend_thresh}, ER {er:.2f}, EMA5 > EMA15)",
+            )
+
         # High-conviction structural pullback: Discount + Confirmed tick bounce + Directional efficiency
         is_discount = (z_score <= -0.5) or (tick_rsi <= 50.0) or (current_price <= lower_bb)
         is_reversal_confirmed = last_tick_up and (down_ticks >= 1)
         if is_discount and is_reversal_confirmed and er >= er_threshold:
+            # If persistent trend, require confirmed bounce to avoid catching falling knife
             conv = 0.94 if dual_htf_aligned else 0.86
             return (
                 "CALL",
@@ -314,6 +413,15 @@ def evaluate_tick_bias(
                 f"{align_desc}, but oversold (RSI {tick_rsi:.1f}, Z {z_score:+.2f}). Waiting for bounce.",
             )
 
+        # Persistent Trend Continuation: When H > threshold, downtrend momentum has dominant edge
+        if is_persistent_trend and is_downtrend and last_tick_down and er >= 0.38 and tick_rsi >= 35.0:
+            conv = 0.94 if dual_htf_aligned else 0.88
+            return (
+                "PUT",
+                conv,
+                f"{align_desc} persistent impulse continuation (H {hurst:.2f} > {h_trend_thresh}, ER {er:.2f}, EMA5 < EMA15)",
+            )
+
         # High-conviction structural bounce fade: Premium + Confirmed tick rejection + Directional efficiency
         is_premium = (z_score >= 0.5) or (tick_rsi >= 50.0) or (current_price >= upper_bb)
         is_reversal_confirmed = last_tick_down and (up_ticks >= 1)
@@ -338,18 +446,28 @@ def evaluate_tick_bias(
             )
 
     # 6. Neutral HTF Mode: Statistical Mean-Reversion Extremes Only
-    # Require confirmed tick reversal (down-tick for PUT / up-tick for CALL) + exhaustion
-    if (z_score >= 2.0 or (current_price >= upper_bb and z_score >= 1.8)) and tick_rsi >= 68.0 and last_tick_down and up_ticks >= 1:
+    # In neutral mode, require mean-reversion regime or strong statistical extreme with reversal confirmation
+    if not is_persistent_trend and (z_score >= 2.0 or (current_price >= upper_bb and z_score >= 1.8)) and tick_rsi >= 68.0 and last_tick_down and up_ticks >= 1:
+        conv = 0.92 if is_mean_reverting else 0.86
         return (
             "PUT",
-            0.92,
-            f"Overbought confirmed statistical reversal (Z {z_score:+.2f} >= 2.0, RSI {tick_rsi:.1f}, tick reversal confirmed)",
+            conv,
+            f"Overbought confirmed statistical reversal (Z {z_score:+.2f} >= 2.0, RSI {tick_rsi:.1f}, H {hurst:.2f}, tick reversal confirmed)",
         )
-    elif (z_score <= -2.0 or (current_price <= lower_bb and z_score <= -1.8)) and tick_rsi <= 32.0 and last_tick_up and down_ticks >= 1:
+    elif not is_persistent_trend and (z_score <= -2.0 or (current_price <= lower_bb and z_score <= -1.8)) and tick_rsi <= 32.0 and last_tick_up and down_ticks >= 1:
+        conv = 0.92 if is_mean_reverting else 0.86
         return (
             "CALL",
-            0.92,
-            f"Oversold confirmed statistical reversal (Z {z_score:+.2f} <= -2.0, RSI {tick_rsi:.1f}, tick reversal confirmed)",
+            conv,
+            f"Oversold confirmed statistical reversal (Z {z_score:+.2f} <= -2.0, RSI {tick_rsi:.1f}, H {hurst:.2f}, tick reversal confirmed)",
+        )
+
+    # If regime is Brownian noise with low efficiency, sit out
+    if not is_persistent_trend and not is_mean_reverting and er < 0.35:
+        return (
+            preferred_default,
+            0.35,
+            f"Brownian Random Walk noise (H {hurst:.2f}, ER {er:.2f}); sitting out (no statistical edge)",
         )
 
     # 6B. Exhaustion Pullbacks & Impulses in Micro-Trend

@@ -149,8 +149,18 @@ BOT_MODE                    = os.getenv("BOT_MODE", "DBOT").upper()
 DBOT_SYMBOL                 = os.getenv("DBOT_SYMBOL", "1HZ100V")
 DBOT_DIRECTION_MODE         = os.getenv("DBOT_DIRECTION_MODE", "DYNAMIC").upper() # "DYNAMIC", "TREND_FOLLOW", "PUT", "CALL"
 DBOT_CONTRACT_TYPE          = os.getenv("DBOT_CONTRACT_TYPE", "PUT").upper()     # Baseline fallback: "PUT" (Fall) or "CALL" (Rise)
-DBOT_DURATION               = int(os.getenv("DBOT_DURATION", "15"))              # 15s optimal impulse horizon for 1HZ100V
+# Contract Category: "HIGHER_LOWER" (High Win-Rate Barrier Offset >=74%) or "RISE_FALL" (Standard 50/50 binary)
+DBOT_CONTRACT_CATEGORY      = os.getenv("DBOT_CONTRACT_CATEGORY", "HIGHER_LOWER").upper()
+DBOT_BARRIER_OFFSET_ATR     = float(os.getenv("DBOT_BARRIER_OFFSET_ATR", "1.5"))  # 1.5x ATR buffer yields >=74% win probability
+DBOT_ADAPTIVE_DURATION      = os.getenv("DBOT_ADAPTIVE_DURATION", "true").lower() == "true" # Adaptive duration for HTF setups
+DBOT_HTF_DURATION           = int(os.getenv("DBOT_HTF_DURATION", "30"))           # 30s duration for HTF trend continuation
+DBOT_DURATION               = int(os.getenv("DBOT_DURATION", "15"))              # 15s default duration for 1HZ100V
 DBOT_DURATION_UNIT          = os.getenv("DBOT_DURATION_UNIT", "s")               # "s" for seconds ("t" for ticks)
+
+# Hurst Exponent (H) Regime Detection: Prevents fading strong persistent trends
+DBOT_USE_HURST_FILTER       = os.getenv("DBOT_USE_HURST_FILTER", "true").lower() == "true"
+DBOT_HURST_TREND_THRESHOLD  = float(os.getenv("DBOT_HURST_TREND_THRESHOLD", "0.52")) # H > 0.52 = Trending/Persistent (Fades BANNED)
+DBOT_HURST_MEAN_REV_THRESHOLD = float(os.getenv("DBOT_HURST_MEAN_REV_THRESHOLD", "0.48")) # H < 0.48 = Mean-reverting (Fades ALLOWED)
 
 # Staking strategy: "FLAT" (Quant Recommended: Fixed 1-unit sizing, zero Martingale/D'Alembert drag),
 #                   "CONVICTION" ($2 base, $3 on >=92% conviction + dual HTF, flat reset on loss),

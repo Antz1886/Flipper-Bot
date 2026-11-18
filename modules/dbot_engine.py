@@ -54,10 +54,18 @@ class DBotEngine:
         daily_max_stake_usd: float = getattr(config, "DBOT_DAILY_MAX_STAKE_USD", 0.0),
         daily_stop_loss_usd: float = getattr(config, "DBOT_DAILY_STOP_LOSS_USD", 0.0),
         daily_take_profit_usd: float = getattr(config, "DBOT_DAILY_TAKE_PROFIT_USD", 0.0),
+        contract_category: str = getattr(config, "DBOT_CONTRACT_CATEGORY", "HIGHER_LOWER"),
+        barrier_offset_atr: float = getattr(config, "DBOT_BARRIER_OFFSET_ATR", 1.5),
+        adaptive_duration: bool = getattr(config, "DBOT_ADAPTIVE_DURATION", True),
+        htf_duration: int = getattr(config, "DBOT_HTF_DURATION", 30),
     ):
         self.symbol = symbol
         self.direction_mode = direction_mode.upper()
         self.contract_type = contract_type.upper()
+        self.contract_category = contract_category.upper()
+        self.barrier_offset_atr = float(barrier_offset_atr)
+        self.adaptive_duration = bool(adaptive_duration)
+        self.htf_duration = int(htf_duration)
         self.duration = duration
         self.duration_unit = duration_unit
         self.staking_strategy = staking_strategy.upper()
@@ -217,7 +225,13 @@ class DBotEngine:
         log.info(f"   Asset Symbol        : {self.symbol}")
         log.info(f"   Direction Mode      : {self.direction_mode} (Dynamic Tick Momentum + HTF M1 Filter)")
         log.info(f"   Default Contract    : {self.contract_type} ({'Fall' if self.contract_type == 'PUT' else 'Rise'})")
-        log.info(f"   Duration            : {self.duration} {self.duration_unit} (ticks)")
+        log.info(f"   Contract Category   : {self.contract_category} ({'High Win-Rate Barrier Offset (>=74%)' if self.contract_category == 'HIGHER_LOWER' else 'Standard Binary (Rise/Fall)'})")
+        if self.contract_category == "HIGHER_LOWER":
+            log.info(f"   Barrier Offset ATR  : {self.barrier_offset_atr:.1f}x ATR (Statistical Clearance Buffer)")
+        log.info(f"   Duration            : {self.duration} {self.duration_unit} (ticks/seconds)")
+        log.info(f"   Adaptive Duration   : {'Active (' + str(self.htf_duration) + 's on HTF setups)' if self.adaptive_duration else 'Disabled'}")
+        log.info(f"   Hurst Regime Filter : {'Active (H > ' + str(getattr(config, 'DBOT_HURST_TREND_THRESHOLD', 0.52)) + ')' if getattr(config, 'DBOT_USE_HURST_FILTER', True) else 'Disabled'}")
+        log.info(f"   Tick Feed Watchdog  : Active (Auto-reconnect on stagnant buffer)")
         log.info(f"   Staking Strategy    : {self.staking_strategy}")
         log.info(f"   Base Stake          : ${self.base_stake:.2f} USD")
         if self.staking_strategy == "DALEMBERT":
@@ -275,20 +289,29 @@ class DBotEngine:
             log.warning(f"Failed to fetch balance: {e}")
             return self.current_balance or 0.0
 
-    async def get_proposal(self, stake: float, contract_type: str) -> dict | None:
-        """Request price proposal for binary options contract."""
+    async def get_proposal(
+        self,
+        stake: float,
+        contract_type: str,
+        barrier: str | None = None,
+        duration: int | None = None,
+    ) -> dict | None:
+        """Request price proposal for binary options / barrier offset contract."""
         api = await self._ensure_connection()
         symbol_key = "underlying_symbol" if getattr(api, "using_otp_ws", False) else "symbol"
+        use_duration = duration if duration is not None else self.duration
         payload = {
             "proposal": 1,
             "amount": round(stake, 2),
             "basis": "stake",
             "contract_type": contract_type,
             "currency": api.currency or "USD",
-            "duration": self.duration,
+            "duration": use_duration,
             "duration_unit": self.duration_unit,
             symbol_key: self.symbol,
         }
+        if barrier:
+            payload["barrier"] = barrier
 
         for attempt in range(1, config.MAX_RETRIES + 1):
             try:
@@ -646,8 +669,34 @@ class DBotEngine:
         )
         log.info(f"    Edge Rationale: {rationale}")
 
+        # Determine trade duration & contract parameters
+        trade_duration = self.duration
+        if self.adaptive_duration and ("Dual HTF" in rationale or "HTF" in rationale):
+            trade_duration = max(self.duration, self.htf_duration)
+
+        barrier = None
+        target_contract = chosen_dir
+        if self.contract_category == "HIGHER_LOWER":
+            # Dynamic Barrier Sizing (Statistical clearance buffer for >=74% win probability)
+            from modules.direction_engine import _last_seen_ticks, _calculate_atr
+            curr_atr = _calculate_atr(_last_seen_ticks, period=14) if len(_last_seen_ticks) >= 5 else 0.80
+            if curr_atr <= 0:
+                curr_atr = 0.80
+            offset_val = round(max(curr_atr * self.barrier_offset_atr, 0.40), 2)
+            if chosen_dir == "CALL":
+                target_contract = "HIGHER"
+                barrier = f"-{offset_val:.2f}"
+            else:
+                target_contract = "LOWER"
+                barrier = f"+{offset_val:.2f}"
+
         # 1. Obtain Proposal
-        proposal = await self.get_proposal(stake_to_use, contract_type=chosen_dir)
+        proposal = await self.get_proposal(
+            stake_to_use,
+            contract_type=target_contract,
+            barrier=barrier,
+            duration=trade_duration,
+        )
         if not proposal:
             log.error("Unable to obtain valid Deriv price proposal. Waiting before retry...")
             await asyncio.sleep(3.0)
@@ -665,9 +714,10 @@ class DBotEngine:
             return True
 
         contract_id = int(buy_data["contract_id"])
+        contract_tag = f"{target_contract} [{barrier}]" if barrier else target_contract
         log.info(
-            f"Contract #{contract_id} OPEN | {chosen_dir} | Stake: ${ask_price:.2f} | "
-            f"Expected Payout: ${expected_payout:.2f} | Streaming settlement..."
+            f"Contract #{contract_id} OPEN | {contract_tag} | {trade_duration}{self.duration_unit} | "
+            f"Stake: ${ask_price:.2f} | Expected Payout: ${expected_payout:.2f} | Streaming settlement..."
         )
 
         # 3. Real-Time Streaming Settlement

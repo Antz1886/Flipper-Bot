@@ -29,6 +29,7 @@ from modules.direction_engine import (
     evaluate_tick_bias,
     _calculate_ema,
     _calculate_rsi,
+    _calculate_hurst_exponent,
     evaluate_htf_trend,
 )
 
@@ -113,6 +114,30 @@ class TestDirectionEngine(unittest.TestCase):
         dir_res, conv_res, rationale = evaluate_tick_bias(prices, preferred_default="PUT")
         self.assertLess(conv_res, 0.50)
         self.assertIn("Volatility Squeeze / Dead Chop", rationale)
+
+    def test_hurst_exponent_calculation(self):
+        # Strongly trending series (persistent) should have H > 0.50
+        trend_prices = [100.0 + (i * 1.5) for i in range(40)]
+        h_trend = _calculate_hurst_exponent(trend_prices)
+        self.assertGreater(h_trend, 0.50)
+
+        # Strongly oscillating series (mean-reverting) should have H < 0.50
+        reverting_prices = [100.0 + (1.0 if i % 2 == 0 else -1.0) for i in range(40)]
+        h_rev = _calculate_hurst_exponent(reverting_prices)
+        self.assertLess(h_rev, 0.50)
+
+    def test_hurst_trend_persistence_gating(self):
+        # Persistent bullish trend: Continuation should trigger high conviction
+        prices = [1200.0 + (i * 0.4) for i in range(30)] + [1212.5, 1213.0]
+        dir_res, conv_res, rationale = evaluate_tick_bias(
+            prices=prices,
+            htf_trend="BULLISH",
+            dual_htf_aligned=True,
+            tick_rsi=58.0,
+        )
+        self.assertEqual(dir_res, "CALL")
+        self.assertGreaterEqual(conv_res, 0.88)
+        self.assertIn("persistent impulse continuation", rationale)
 
 
 class TestDBotEngine(unittest.TestCase):
@@ -522,6 +547,33 @@ class TestDBotEngine(unittest.TestCase):
         self.assertEqual(engine.daily_net_pnl, 0.0)
         self.assertEqual(engine.daily_staked_total, 0.0)
         self.assertEqual(engine.daily_trades, 0)
+
+    @patch("modules.dbot_engine.DBotEngine.refresh_balance", new_callable=AsyncMock)
+    @patch("modules.dbot_engine.DBotEngine.get_proposal", new_callable=AsyncMock)
+    @patch("modules.dbot_engine.DBotEngine.buy_contract", new_callable=AsyncMock)
+    @patch("modules.dbot_engine.DBotEngine.wait_for_settlement", new_callable=AsyncMock)
+    def test_higher_lower_barrier_offset_proposal(self, mock_settle, mock_buy, mock_prop, mock_bal):
+        """Validates that HIGHER_LOWER mode computes and dispatches an offset barrier proposal."""
+        mock_bal.return_value = 1000.0
+        mock_prop.return_value = {"id": "prop-hl", "ask_price": 2.0, "payout": 2.6}
+        mock_buy.return_value = {"contract_id": 9999, "buy_price": 2.0}
+        mock_settle.return_value = {"status": "won", "profit": 0.60, "entry_spot": 100.0, "exit_tick": 99.0}
+
+        hl_engine = DBotEngine(
+            contract_category="HIGHER_LOWER",
+            barrier_offset_atr=1.5,
+            direction_mode="PUT",
+            persist_session=False,
+            use_streaming=False,
+        )
+
+        should_continue = asyncio.run(hl_engine.execute_trade_cycle())
+        self.assertTrue(should_continue)
+        mock_prop.assert_called_once()
+        call_kwargs = mock_prop.call_args[1]
+        self.assertEqual(call_kwargs.get("contract_type"), "LOWER")
+        self.assertIsNotNone(call_kwargs.get("barrier"))
+        self.assertTrue(call_kwargs.get("barrier").startswith("+"))
 
 
 if __name__ == "__main__":
